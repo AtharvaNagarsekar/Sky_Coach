@@ -140,6 +140,14 @@ export default function LiveAudioStream() {
               100% { transform: scaleY(1.3); opacity: 1; }
             }
           `}</style>
+
+          <audio 
+            ref={audioRef} 
+            src="https://d.liveatc.net/kaus3_app_dep" 
+            // @ts-expect-error referrerPolicy is not yet defined in React's audio tag types
+            referrerPolicy="no-referrer"
+            preload="none"
+          />
         </div>
       </div>
     </div>
