@@ -1,7 +1,7 @@
 // Transcription Service
 // Uses Groq Whisper API to transcribe aviation audio
 
-const GROQ_API_KEY = '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';
+const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY;
 const GROQ_WHISPER_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 
 // Aviation-specific initial prompt to boost accuracy
@@ -45,7 +45,7 @@ export async function transcribeAudio(audioBlob: Blob): Promise<TranscriptionRes
     }
 
     const data = await response.json();
-    
+
     // Calculate average word confidence if available
     let confidence = 0.85; // default
     if (data.segments && data.segments.length > 0) {

@@ -1,7 +1,7 @@
 // Simulator Engine
 // Manages ATC training sessions using Groq LLM with strict aviation format
 
-const GROQ_API_KEY = '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';
+const GROQ_API_KEY = import.meta.env.VITE_GROQ_API_KEY;
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
 export type Situation =
@@ -18,21 +18,21 @@ export interface SituationConfig {
 }
 
 export const SITUATIONS: Record<string, SituationConfig> = {
-  parked:           { label: 'Parked / Pre-Departure', group: 'Ground', atcSpeaksFirst: false, context: 'Aircraft parked at gate, pilot requesting ATIS and IFR clearance.' },
-  pushback:         { label: 'Pushback & Engine Start', group: 'Ground', atcSpeaksFirst: true,  context: 'Ground control initiates pushback clearance.' },
-  taxi_out:         { label: 'Taxi to Runway', group: 'Ground', atcSpeaksFirst: false, context: 'Aircraft taxiing to assigned runway, following complex taxi instructions.' },
-  departure:        { label: 'Departure / Takeoff', group: 'Departure', atcSpeaksFirst: true,  context: 'Tower clears aircraft for takeoff and initial departure instructions.' },
-  climb:            { label: 'Climb / Frequency Change', group: 'Departure', atcSpeaksFirst: true,  context: 'Departure control issuing climb clearances and frequency changes.' },
-  cruise:           { label: 'Cruise / Center', group: 'En-Route', atcSpeaksFirst: true,  context: 'Center control issuing altitude and routing amendments.' },
-  descend:          { label: 'Descent / Approach', group: 'En-Route', atcSpeaksFirst: true,  context: 'Approach control issuing descent clearances and approach sequence.' },
-  arrival:          { label: 'Arrival / ILS', group: 'Arrival', atcSpeaksFirst: true,  context: 'Approach vectoring pilot for ILS approach to KAUS.' },
-  hold:             { label: 'Holding Pattern', group: 'Arrival', atcSpeaksFirst: true,  context: 'ATC issues holding instructions due to traffic.' },
-  taxi_in:          { label: 'Taxi to Gate', group: 'Arrival', atcSpeaksFirst: true,  context: 'Ground control gives taxi to gate instructions after landing.' },
-  parked_gate:      { label: 'Shutdown at Gate', group: 'Arrival', atcSpeaksFirst: false, context: 'Pilot contacts ground to report at gate, final checks.' },
-  emergency_weather:{ label: 'Weather Deviation', group: 'Emergency', atcSpeaksFirst: false, context: 'Pilot declaring deviation from flight plan due to severe weather ahead, requesting new routing.' },
-  emergency_medical:{ label: 'Medical Emergency', group: 'Emergency', atcSpeaksFirst: false, context: 'Pilot declaring medical emergency on board, requesting priority handling and immediate landing.' },
-  emergency_traffic:{ label: 'Traffic Advisory / TCAS RA', group: 'Emergency', atcSpeaksFirst: true,  context: 'TCAS resolution advisory. ATC issuing traffic alerts.' },
-  complete_flight:  { label: 'Complete Flight Simulation', group: 'Full Flight', atcSpeaksFirst: false, context: 'Full IFR flight from KAUS to KDFW. All phases from pre-departure clearance to taxi in.' },
+  parked: { label: 'Parked / Pre-Departure', group: 'Ground', atcSpeaksFirst: false, context: 'Aircraft parked at gate, pilot requesting ATIS and IFR clearance.' },
+  pushback: { label: 'Pushback & Engine Start', group: 'Ground', atcSpeaksFirst: true, context: 'Ground control initiates pushback clearance.' },
+  taxi_out: { label: 'Taxi to Runway', group: 'Ground', atcSpeaksFirst: false, context: 'Aircraft taxiing to assigned runway, following complex taxi instructions.' },
+  departure: { label: 'Departure / Takeoff', group: 'Departure', atcSpeaksFirst: true, context: 'Tower clears aircraft for takeoff and initial departure instructions.' },
+  climb: { label: 'Climb / Frequency Change', group: 'Departure', atcSpeaksFirst: true, context: 'Departure control issuing climb clearances and frequency changes.' },
+  cruise: { label: 'Cruise / Center', group: 'En-Route', atcSpeaksFirst: true, context: 'Center control issuing altitude and routing amendments.' },
+  descend: { label: 'Descent / Approach', group: 'En-Route', atcSpeaksFirst: true, context: 'Approach control issuing descent clearances and approach sequence.' },
+  arrival: { label: 'Arrival / ILS', group: 'Arrival', atcSpeaksFirst: true, context: 'Approach vectoring pilot for ILS approach to KAUS.' },
+  hold: { label: 'Holding Pattern', group: 'Arrival', atcSpeaksFirst: true, context: 'ATC issues holding instructions due to traffic.' },
+  taxi_in: { label: 'Taxi to Gate', group: 'Arrival', atcSpeaksFirst: true, context: 'Ground control gives taxi to gate instructions after landing.' },
+  parked_gate: { label: 'Shutdown at Gate', group: 'Arrival', atcSpeaksFirst: false, context: 'Pilot contacts ground to report at gate, final checks.' },
+  emergency_weather: { label: 'Weather Deviation', group: 'Emergency', atcSpeaksFirst: false, context: 'Pilot declaring deviation from flight plan due to severe weather ahead, requesting new routing.' },
+  emergency_medical: { label: 'Medical Emergency', group: 'Emergency', atcSpeaksFirst: false, context: 'Pilot declaring medical emergency on board, requesting priority handling and immediate landing.' },
+  emergency_traffic: { label: 'Traffic Advisory / TCAS RA', group: 'Emergency', atcSpeaksFirst: true, context: 'TCAS resolution advisory. ATC issuing traffic alerts.' },
+  complete_flight: { label: 'Complete Flight Simulation', group: 'Full Flight', atcSpeaksFirst: false, context: 'Full IFR flight from KAUS to KDFW. All phases from pre-departure clearance to taxi in.' },
 };
 
 export interface ConversationMessage {
