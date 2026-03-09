@@ -3,6 +3,17 @@ import { NavLink } from 'react-router-dom';
 
 const NAV_ITEMS = [
   {
+    to: '/live-stream',
+    icon: (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+        <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+      </svg>
+    ),
+    label: 'Live Stream',
+    sublabel: 'Audio Only',
+  },
+  {
     to: '/live-atc',
     icon: (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -11,8 +22,8 @@ const NAV_ITEMS = [
         <circle cx="12" cy="12" r="8" strokeDasharray="3 2"/>
       </svg>
     ),
-    label: 'Live ATC',
-    sublabel: 'Transcription',
+    label: 'ATC Transcription',
+    sublabel: 'AI Analyzed',
   },
   {
     to: '/voice-analyzer',
