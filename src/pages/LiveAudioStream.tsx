@@ -8,11 +8,9 @@ export default function LiveAudioStream() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
-    // Initialize standard audio element
-    audioRef.current = new Audio();
-    // Native audio without crossOrigin taint since we bypass WebAudio nodes entirely
-    audioRef.current.src = 'https://d.liveatc.net/kaus3_app_dep';
-    
+    const audio = audioRef.current;
+    if (!audio) return;
+
     const handlePlaying = () => {
       setStatus('live');
       setIsPlaying(true);
@@ -32,7 +30,6 @@ export default function LiveAudioStream() {
       setIsPlaying(false);
     };
 
-    const audio = audioRef.current;
     audio.addEventListener('playing', handlePlaying);
     audio.addEventListener('waiting', handleWaiting);
     audio.addEventListener('error', handleError);
@@ -44,7 +41,6 @@ export default function LiveAudioStream() {
       audio.removeEventListener('error', handleError);
       audio.removeEventListener('pause', handlePause);
       audio.pause();
-      audio.src = '';
     };
   }, []);
 
