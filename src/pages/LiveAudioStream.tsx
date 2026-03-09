@@ -108,7 +108,7 @@ export default function LiveAudioStream() {
             
             <h3 style={{ margin: '10px 0 5px 0' }}>KAUS Approach/Departure</h3>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', margin: 0 }}>
-              Live stream directly from d.liveatc.net
+              Live stream directly from edge node s1-bos.liveatc.net
             </p>
           </div>
 
@@ -143,9 +143,8 @@ export default function LiveAudioStream() {
 
           <audio 
             ref={audioRef} 
-            src="https://d.liveatc.net/kaus3_app_dep" 
-            // @ts-expect-error referrerPolicy is not yet defined in React's audio tag types
-            referrerPolicy="no-referrer"
+            src="https://s1-bos.liveatc.net/kaus3_app_dep" 
+            crossOrigin="anonymous"
             preload="none"
           />
         </div>

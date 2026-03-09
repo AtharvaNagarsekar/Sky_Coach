@@ -38,34 +38,43 @@ export class ATCStreamCapture {
     try {
       this.onStatus('connecting');
 
-      // Create audio element pointing directly at LiveATC to bypass proxies completely
+      // Create audio element pointing directly at LiveATC's Edge Node
       this.audioEl = new Audio();
-      // We DO NOT set crossOrigin = 'anonymous' because LiveATC doesn't send CORS headers. 
-      // This allows the browser to play it natively, but WebAudio/Canvas will be 'tainted' (silenced).
-      this.audioEl.src = 'https://d.liveatc.net/kaus3_app_dep';
+      // The edge node (unlike the load balancer) sends Access-Control-Allow-Origin: *
+      // This means we CAN use crossOrigin and the WebAudio API without being tainted!
+      this.audioEl.crossOrigin = 'anonymous';
+      this.audioEl.src = 'https://s1-bos.liveatc.net/kaus3_app_dep';
       this.audioEl.volume = 1.0;
 
-      // Set up Web Audio pipeline (Dummy pipeline to prevent crashes, since real stream 
-      // is tainted and would output silence if routed through nodes here).
+      // Re-enable Web Audio pipeline for transcription processing
       this.audioCtx = new AudioContext({ sampleRate: 16000 });
-      
-      // We skip connecting the real sourceNode to the filters because of CORS taint silencing native playback.
-      // Instead, we just let the <audio> element play natively out of the speakers.
-      this.dest = this.audioCtx.createMediaStreamDestination();
-      
-      // Dummy gain to satisfy volume controls
+      const sourceNode = this.audioCtx.createMediaElementSource(this.audioEl);
+
+      // High-pass filter to remove low rumble
+      const hp = this.audioCtx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.value = 280;
+
+      // Low-pass filter to match VHF voice band
+      const lp = this.audioCtx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 3500;
+
+      // Gain for normalization
       this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = 1.0;
+      this.gainNode.gain.value = 2.5;
 
       // Destination for MediaRecorder
       this.dest = this.audioCtx.createMediaStreamDestination();
 
-      // Chain: gain → dest (dummy chain)
-      // We don't connect to audioCtx.destination because the actual <audio> element is playing natively.
+      // Chain: source → hp → lp → gain → dest + speakers
+      sourceNode.connect(hp);
+      hp.connect(lp);
+      lp.connect(this.gainNode);
       this.gainNode.connect(this.dest);
-
-      // Start recorder (it will record silence since nothing is feeding the gainNode, 
-      // but prevents crashes)
+      this.gainNode.connect(this.audioCtx.destination); // For listening
+      
+      // Start recorder (it will successfully record and chunk stream audio now!)
       this.recorder = new MediaRecorder(this.dest.stream, {
         mimeType: this.getSupportedMimeType(),
         audioBitsPerSecond: 64000,
