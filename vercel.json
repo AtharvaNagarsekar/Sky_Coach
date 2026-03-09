@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/atcstream",
+      "destination": "https://d.liveatc.net/kaus3_app_dep"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}
