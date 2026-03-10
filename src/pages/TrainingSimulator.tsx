@@ -5,16 +5,19 @@ import {
   buildSessionContext, getATCResponse, validateReadback, aggregateStats,
 } from '../services/simulatorEngine';
 import type { ConversationMessage, ReadbackValidation, SessionStats } from '../services/simulatorEngine';
-import { transcribeAudio } from '../services/transcriptionService';
+import { transcribeForSimulator } from '../services/transcriptionService';
 import { speakATC, cancelTTS, initTTS } from '../services/ttsService';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { v4 as uuid } from 'uuid';
+import { updateQValue, selectRLScenario, getRLRecommendations } from '../services/rlEngine';
+import type { ScenarioType } from '../services/rlEngine';
 
 // ─── Setup Screen ──────────────────────────────────────────────────────────────
-function SetupScreen({ onStart }: { onStart: (situation: string, callsign: string, custom: string) => void }) {
+function SetupScreen({ onStart }: { onStart: (situation: string, callsign: string, custom: string, isChain: boolean) => void }) {
   const [situation, setSituation] = useState('taxi_out');
   const [callsign, setCallsign] = useState('N1234A');
   const [custom, setCustom] = useState('');
+  const [isChain, setIsChain] = useState(false);
 
   // Group situations
   const groups: Record<string, string[]> = {};
@@ -89,16 +92,27 @@ function SetupScreen({ onStart }: { onStart: (situation: string, callsign: strin
             <span style={{ fontSize: '0.82rem' }}>
               {situation !== 'custom' && SITUATIONS[situation]
                 ? (SITUATIONS[situation].atcSpeaksFirst
-                    ? 'ATC will speak first in this scenario.'
-                    : 'You (pilot) speak first in this scenario.')
+                  ? 'ATC will speak first in this scenario.'
+                  : 'You (pilot) speak first in this scenario.')
                 : 'You (pilot) speak first.'}
             </span>
+          </div>
+
+          {/* Mode Toggle */}
+          <div className="glass-panel" style={{ padding: 16, background: 'rgba(20,30,40,0.4)' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer' }}>
+              <input type="checkbox" checked={isChain} onChange={e => setIsChain(e.target.checked)} style={{ width: 18, height: 18, accentColor: 'var(--cyan-primary)' }} />
+              <div>
+                <div style={{ fontWeight: 600, color: isChain ? 'var(--cyan-primary)' : 'var(--text-primary)' }}>🔗 Chain Session (Full Flight)</div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Continuous conversation from taxi to parking</div>
+              </div>
+            </label>
           </div>
 
           <button
             className="btn btn-primary btn-lg"
             style={{ width: '100%', justifyContent: 'center' }}
-            onClick={() => onStart(situation, callsign || 'N1234A', custom)}
+            onClick={() => onStart(situation, callsign || 'N1234A', custom, isChain)}
             disabled={situation === 'custom' && !custom.trim()}
           >
             ▶ Start Training Session
@@ -178,6 +192,16 @@ function WeaknessTracker({ stats }: { stats: SessionStats }) {
         </div>
       </div>
 
+      <div style={{ padding: 12, background: 'rgba(0,0,0,0.2)', borderRadius: 8, marginBottom: 16 }}>
+        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 4 }}>🧠 RL Engine Weakness Tracking</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Primary Weakness:</span>
+          <span className="badge" style={{ background: 'rgba(255,179,71,0.15)', color: 'var(--amber)', border: '1px solid rgba(255,179,71,0.3)' }}>
+            {stats.weakestCategory.toUpperCase()}
+          </span>
+        </div>
+      </div>
+
       {chartData.length > 0 && (
         <>
           <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>Errors by Category</div>
@@ -225,6 +249,13 @@ export default function TrainingSimulator() {
   const [sessionHistory, setSessionHistory] = useState<Array<{ role: 'system' | 'user' | 'assistant'; content: string }>>([]);
   const [error, setError] = useState<string | null>(null);
 
+  // Chain Session + Text Fallback state
+  const [isChainSession, setIsChainSession] = useState(false);
+  const [chainHistory, setChainHistory] = useState<Array<{ role: 'pilot' | 'atc' | 'situation'; text: string }>>([]);
+  const [scenarioTraffic, setScenarioTraffic] = useState<ScenarioType>('Normal Traffic');
+  const [fallbackText, setFallbackText] = useState('');
+  const [processingStatus, setProcessingStatus] = useState<string>('');
+
   const chatRef = useRef<HTMLDivElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
@@ -254,12 +285,18 @@ export default function TrainingSimulator() {
       setError('Failed to get ATC response. Check your connection.');
       setIsATCTalking(false);
     }
-  }, []);
+  }, [isChainSession, chainHistory, scenarioTraffic, callsign]);
 
-  const handleStart = async (sit: string, cs: string, customTopic: string) => {
+  const handleStart = async (sit: string, cs: string, customTopic: string, chain: boolean) => {
     setSituation(sit);
     setCallsign(cs);
     setMessages([]);
+    setFallbackText('');
+    setIsChainSession(chain);
+
+    // Choose RL Scenario Type if doing a full chain
+    const chosenTraffic = chain ? selectRLScenario({ weakestCategory: 'None' }) : 'Normal Traffic';
+    setScenarioTraffic(chosenTraffic);
 
     const sysCtx = buildSessionContext(sit as any, cs, customTopic);
     const sysMsg = { role: 'system' as const, content: `${sysCtx}\n\nYou are the ATC controller. Provide realistic ATC radio communications for this training scenario. Include EXPECTED_READBACK after each transmission.` };
@@ -268,6 +305,35 @@ export default function TrainingSimulator() {
     setPhase('session');
 
     const cfg = SITUATIONS[sit];
+
+    if (chain) {
+      const introMsg = `Initial Briefing: ${cfg ? cfg.context : customTopic}. Traffic density: ${chosenTraffic}.`;
+      setChainHistory([{ role: 'situation', text: introMsg }]);
+      const prompt: ConversationMessage = { id: uuid(), role: 'atc', text: `[Chain Session Started: ${chosenTraffic}. The flight is now active.]`, timestamp: new Date() };
+      appendMessage(prompt);
+
+      // ATC generates first instruction in chain mode
+      setIsATCTalking(true);
+      setError(null);
+      import('../services/simulatorEngine').then(async m => {
+        try {
+          const resp = await m.generateNextExchange(
+            'Austin-Bergstrom International Airport (KAUS)', cs, 'Medium',
+            [{ role: 'situation', text: introMsg }], chosenTraffic
+          );
+          setCurrentExpected(resp.expected_readback);
+          const msg: ConversationMessage = { id: uuid(), role: 'atc', text: resp.atc_transmission, timestamp: new Date() };
+          appendMessage(msg);
+          setChainHistory(prev => [...prev, { role: 'atc', text: resp.atc_transmission }]);
+          speakATC(resp.atc_transmission, () => setIsATCTalking(false));
+        } catch (e) {
+          setError('Failed to generate chain instruction.');
+          setIsATCTalking(false);
+        }
+      });
+      return;
+    }
+
     const atcFirst = cfg ? cfg.atcSpeaksFirst : false;
 
     if (atcFirst) {
@@ -291,8 +357,11 @@ export default function TrainingSimulator() {
       rec.start(100);
       recorderRef.current = rec;
       setIsRecording(true);
+      setError(null);
+      setFallbackText('');
     } catch {
       alert('Microphone access required for the simulator.');
+      setIsRecording(false);
     }
   };
 
@@ -300,39 +369,116 @@ export default function TrainingSimulator() {
     if (!recorderRef.current || !isRecording) return;
     setIsRecording(false);
     setIsProcessing(true);
-    setError(null);
-
-    recorderRef.current.stop();
-    streamRef.current?.getTracks().forEach(t => t.stop());
-
-    await new Promise(res => setTimeout(res, 200));
-    const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+    setProcessingStatus('⏳ Finalising audio...');
 
     try {
-      const result = await transcribeAudio(blob, '', [], true); // true = isSimulator
-      if (!result.text.trim()) { setIsProcessing(false); return; }
+      recorderRef.current.stop();
+      streamRef.current?.getTracks().forEach(t => t.stop());
+    } catch(e) {}
 
-      const pilotMsg: ConversationMessage = { id: uuid(), role: 'pilot', text: result.text, timestamp: new Date() };
+    // Wait for recorder to flush all chunks
+    await new Promise(res => setTimeout(res, 300));
+    const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+
+    if (blob.size < 1000) {
+      setError('Audio too short. Please hold the button and speak clearly.');
+      setProcessingStatus('');
+      setIsProcessing(false);
+      recorderRef.current = null;
+      return;
+    }
+
+    try {
+      setProcessingStatus('🎙️ Whisper transcribing...');
+      const { correctedText, rawText } = await transcribeForSimulator(
+        blob,
+        currentExpected,
+        callsign
+      );
+
+      if (!correctedText && !rawText) {
+        setError('No speech detected. Please speak louder or closer to the mic.');
+        setProcessingStatus('');
+      } else {
+        setProcessingStatus('✅ Done');
+        setFallbackText(correctedText || rawText);
+        console.log('[Simulator STT] raw:', rawText, '→ corrected:', correctedText);
+      }
+    } catch (e: any) {
+      console.error('Transcription error:', e);
+      setError(`Transcription failed: ${e?.message || 'Unknown error'}. You can type your response instead.`);
+      setProcessingStatus('');
+    } finally {
+      setIsProcessing(false);
+      recorderRef.current = null;
+      setTimeout(() => setProcessingStatus(''), 2500);
+    }
+  };
+
+  const submitFallbackText = async () => {
+    if (!fallbackText.trim()) return;
+    setIsProcessing(true);
+
+    const pilotText = fallbackText;
+    setFallbackText('');
+
+    try {
+      const pilotMsg: ConversationMessage = { id: uuid(), role: 'pilot', text: pilotText, timestamp: new Date() };
 
       // Validate readback
       const lastATCMsg = [...messages].reverse().find(m => m.role === 'atc' && !m.text.startsWith('[Session'));
       let validation: ReadbackValidation | undefined;
       if (lastATCMsg && currentExpected) {
-        validation = await validateReadback(lastATCMsg.text, result.text, currentExpected, callsign);
+        validation = await validateReadback(lastATCMsg.text, pilotText, currentExpected, callsign);
         pilotMsg.validation = validation;
       }
 
       appendMessage(pilotMsg);
 
-      // Update session history
-      const newHistory = [...sessionHistory, { role: 'user' as const, content: result.text }];
-      setSessionHistory(newHistory);
-      setIsProcessing(false);
+      if (isChainSession) {
+        const newHistory = [...chainHistory, { role: 'pilot' as const, text: pilotText }];
+        setChainHistory(newHistory);
+        setIsProcessing(false);
 
-      // Get next ATC response
-      await addATCMessage(newHistory);
+        // Let RL engine track progress
+        if (validation) {
+          updateQValue({ weakestCategory: 'None' }, scenarioTraffic, validation.score / 100, { weakestCategory: 'None' });
+        }
+
+        import('../services/simulatorEngine').then(async m => {
+          setIsATCTalking(true);
+          try {
+            const resp = await m.generateNextExchange(
+              'Austin-Bergstrom International Airport (KAUS)', callsign, 'Medium',
+              newHistory, scenarioTraffic
+            );
+            setCurrentExpected(resp.expected_readback);
+
+            if (resp.session_complete) {
+              const msg: ConversationMessage = { id: uuid(), role: 'atc', text: '⛳ SESSION COMPLETE — Aircraft at gate. Well done!', timestamp: new Date() };
+              appendMessage(msg);
+              speakATC(msg.text, () => { setIsATCTalking(false); handleEndSession(); });
+            } else {
+              const msg: ConversationMessage = { id: uuid(), role: 'atc', text: resp.atc_transmission, timestamp: new Date() };
+              appendMessage(msg);
+              setChainHistory(prev => [...prev, { role: 'atc', text: resp.atc_transmission }]);
+              speakATC(resp.atc_transmission, () => setIsATCTalking(false));
+            }
+          } catch (e) {
+            setError('Failed to generate chain instruction.');
+            setIsATCTalking(false);
+          }
+        });
+
+      } else {
+        // Single session block
+        const newHistory = [...sessionHistory, { role: 'user' as const, content: pilotText }];
+        setSessionHistory(newHistory);
+        setIsProcessing(false);
+        await addATCMessage(newHistory);
+      }
     } catch (e) {
-      setError('Transcription failed. Please try again.');
+      setError('Evaluation failed. Please try again.');
       setIsProcessing(false);
     }
   };
@@ -363,19 +509,31 @@ export default function TrainingSimulator() {
         </Header>
         <div style={{ flex: 1, overflow: 'auto', padding: '20px 0 0', display: 'flex', flexDirection: 'column', gap: 20 }}>
           <WeaknessTracker stats={stats} />
+          {/* RL Insights */}
+          {stats && (
+            <div className="glass-panel" style={{ padding: '20px', marginTop: 10, borderLeft: '3px solid var(--purple)' }}>
+              <h3 style={{ marginBottom: 12, color: 'var(--purple)' }}>🤖 RL Engine Recommendation</h3>
+              {getRLRecommendations({ weakestCategory: stats.weakestCategory }).map((rec, i) => (
+                <div key={i} style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: 8, lineHeight: 1.5 }}>
+                  {rec.replace(/\*\*(.*?)\*\*/g, '▪ $1 ▪')}
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="glass-panel" style={{ padding: '20px' }}>
             <h3 style={{ marginBottom: 16 }}>Full Conversation Log</h3>
             {messages.map(msg => (
-              msg.text.startsWith('[Session') ? null :
-              <div key={msg.id} className={`chat-bubble-wrap ${msg.role}`}>
-                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 3 }}>
-                  {msg.role === 'atc' ? '🎙 ATC' : `✈️ ${callsign}`} · {msg.timestamp.toLocaleTimeString()}
+              msg.text.includes('[Chain Session Started') || msg.text.startsWith('[Session') ? null :
+                <div key={msg.id} className={`chat-bubble-wrap ${msg.role}`}>
+                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: 3 }}>
+                    {msg.role === 'atc' ? '🎙 ATC' : `✈️ ${callsign}`} · {msg.timestamp.toLocaleTimeString()}
+                  </div>
+                  <div className={`chat-bubble ${msg.role}`}>
+                    <div style={{ fontFamily: 'Share Tech Mono', fontSize: '0.84rem' }}>{msg.text}</div>
+                    {msg.validation && <ValidationPanel validation={msg.validation} expected={''} />}
+                  </div>
                 </div>
-                <div className={`chat-bubble ${msg.role}`}>
-                  <div style={{ fontFamily: 'Share Tech Mono', fontSize: '0.84rem' }}>{msg.text}</div>
-                  {msg.validation && <ValidationPanel validation={msg.validation} expected={''} />}
-                </div>
-              </div>
             ))}
           </div>
         </div>
@@ -440,27 +598,56 @@ export default function TrainingSimulator() {
             )}
           </div>
 
-          {/* PTT Control */}
-          <div className="glass-panel" style={{ padding: '16px', marginTop: 16, flexShrink: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.07em' }}>
-                  {isRecording ? '● Recording your response...' : isATCTalking ? '🎙 ATC is transmitting...' : isProcessing ? '⚙ Processing...' : 'Press to transmit your response'}
-                </div>
-                <div style={{ height: 4, background: 'rgba(255,255,255,0.05)', borderRadius: 2 }}>
-                  {isRecording && <div style={{ height: '100%', background: 'var(--red)', borderRadius: 2, animation: 'glow-cyan 0.6s ease infinite', width: '100%' }} />}
-                </div>
+          {/* PTT Control exactly matching UI */}
+          <div className="glass-panel" style={{ padding: '20px', marginTop: 16, flexShrink: 0, border: '1px solid rgba(255,255,255,0.08)' }}>
+            
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+              <h3 style={{ margin: 0, fontSize: '1.05rem', color: '#fff' }}>🎙 YOUR READBACK</h3>
+              {(isRecording || processingStatus) && (
+                <span style={{ fontSize: '0.78rem', fontFamily: 'Share Tech Mono', color: isRecording ? 'var(--red)' : 'var(--cyan-primary)', letterSpacing: '0.04em' }}>
+                  {isRecording ? '● REC' : processingStatus}
+                </span>
+              )}
+            </div>
+               <button
+                  className={`btn ${isRecording ? 'btn-danger' : 'btn-primary'} btn-lg`}
+                  style={{ width: '100%', justifyContent: 'center', fontFamily: 'Share Tech Mono', letterSpacing: '0.03em', fontSize: '0.95rem', padding: '16px', borderRadius: 8 }}
+                  onClick={isRecording ? stopRecordingAndProcess : startRecording}
+                  disabled={isATCTalking || isProcessing}
+                >
+                  {isRecording ? '▪ Click to Submit Voice' : '🎙️ VOICE READBACK — Whisper + Mistral Aviation Correction'}
+                </button>
+            
+            <div style={{ marginTop: 24 }}>
+              <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: 8, fontWeight: 500 }}>
+                Or type / edit your readback:
               </div>
+              <textarea
+                className="input-field"
+                style={{ width: '100%', fontFamily: 'Share Tech Mono', fontSize: '0.9rem', minHeight: 75, padding: 12, resize: 'vertical' }}
+                placeholder="Speak above — transcript auto-fills here. Or type manually."
+                value={fallbackText}
+                onChange={e => setFallbackText(e.target.value)}
+                disabled={isATCTalking || isProcessing || isRecording}
+              />
+            </div>
+            
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12, marginTop: 16 }}>
               <button
-                className={`btn ${isRecording ? 'btn-danger' : 'btn-primary'} btn-lg`}
-                style={{ minWidth: 140, justifyContent: 'center' }}
-                onMouseDown={!isRecording && !isATCTalking && !isProcessing ? startRecording : undefined}
-                onMouseUp={isRecording ? stopRecordingAndProcess : undefined}
-                onTouchStart={!isRecording && !isATCTalking && !isProcessing ? startRecording : undefined}
-                onTouchEnd={isRecording ? stopRecordingAndProcess : undefined}
-                disabled={isATCTalking || isProcessing}
+                className="btn btn-primary"
+                onClick={submitFallbackText}
+                disabled={!fallbackText.trim() || isATCTalking || isProcessing || isRecording}
+                style={{ background: 'linear-gradient(135deg, #1e8c45, #14612f)', color: '#fff', fontWeight: 600, border: 'none', padding: '12px', fontSize: '1rem', letterSpacing: '0.05em' }}
               >
-                {isRecording ? '▪ Release to Send' : '🎙 Hold to Talk'}
+                ✅ SUBMIT & EVALUATE
+              </button>
+              
+              <button
+                className="btn btn-ghost"
+                disabled={isATCTalking || isProcessing || isRecording}
+                style={{ background: 'rgba(255,255,255,0.05)', color: '#a8d8ea', fontWeight: 600, border: '1px solid rgba(168,216,234,0.3)' }}
+              >
+                🔁 SHOW ANSWER
               </button>
             </div>
           </div>

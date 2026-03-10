@@ -63,6 +63,7 @@ export interface SessionStats {
   correctReadbacks: number;
   errorsByCategory: Record<string, number>;
   commonMistakes: string[];
+  weakestCategory: string; // Used by RL Engine
 }
 
 export function buildSessionContext(situation: Situation | string, callsign: string, customTopic = ''): string {
@@ -137,6 +138,89 @@ export async function getATCResponse(
   return { atcText: content.trim(), expectedReadback: '' };
 }
 
+const CHAIN_SYSTEM_PROMPT = `You are the ATC controller managing a single aircraft from pre-departure to parking at the destination.
+Generate the NEXT logical ATC radio transmission based on the current flight phase and conversation history.
+
+Output ONLY valid JSON:
+{
+  "flight_phase": "taxi|departure|climb|cruise|descend|approach|arrival|taxi_in|parked_gate",
+  "atc_transmission": "The exact radio call you are making to the pilot",
+  "expected_readback": "The exact readback expected from the pilot",
+  "key_readback_items": ["item1", "item2"],
+  "coaching_notes": "One brief tip for the user",
+  "session_complete": false // set to true ONLY when parked at the gate at the end of the flight
+}
+
+* Keep your radio calls highly realistic, concise, and in standard ICAO phraseology.
+* If the user just completed a readback perfectly, acknowledge and issue the next logical clearance.
+* If the user made a mistake in the previous readback, correct them before issuing the next clearance.`;
+
+export async function generateNextExchange(
+  airportContext: string,
+  callsign: string,
+  difficulty: string,
+  history: Array<{ role: 'pilot' | 'atc' | 'situation'; text: string; }>,
+  scenarioType: string = 'Normal Traffic'
+): Promise<{
+  atc_transmission: string;
+  expected_readback: string;
+  key_readback_items: string[];
+  coaching_notes: string;
+  flight_phase: string;
+  session_complete: boolean;
+}> {
+  // Convert custom history to OpenAI message format
+  const messages = [
+    { 
+      role: 'system' as const, 
+      content: `${CHAIN_SYSTEM_PROMPT}\n\nAirport Context:\n${airportContext}\nAircraft Callsign: ${callsign}\nDifficulty: ${difficulty}\nTraffic Level: ${scenarioType}` 
+    },
+    ...history.map(h => ({
+      role: (h.role === 'pilot' ? 'user' : 'assistant') as 'system'|'user'|'assistant',
+      content: h.role === 'situation' ? `[SITUATION BRIEFING]: ${h.text}` : h.text
+    }))
+  ];
+
+  try {
+    const response = await fetch(GROQ_CHAT_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        messages,
+        temperature: 0.4,
+        response_format: { type: 'json_object' }
+      }),
+    });
+
+    if (!response.ok) throw new Error('Groq API error in Chain Generation');
+    const data = await response.json();
+    const parsed = JSON.parse(data.choices?.[0]?.message?.content || '{}');
+
+    return {
+      atc_transmission: parsed.atc_transmission || '',
+      expected_readback: parsed.expected_readback || '',
+      key_readback_items: parsed.key_readback_items || [],
+      coaching_notes: parsed.coaching_notes || '',
+      flight_phase: parsed.flight_phase || 'cruise',
+      session_complete: Boolean(parsed.session_complete)
+    };
+  } catch (e) {
+    console.error("Chain processing failed", e);
+    return {
+      atc_transmission: `${callsign}, radar contact. Say intentions.`,
+      expected_readback: '',
+      key_readback_items: [],
+      coaching_notes: 'Fallback generation triggered',
+      flight_phase: 'cruise',
+      session_complete: false
+    };
+  }
+}
+
 export async function validateReadback(
   atcClearance: string,
   pilotReadback: string,
@@ -197,10 +281,21 @@ export function aggregateStats(messages: ConversationMessage[]): SessionStats {
     });
   });
 
+  // Calculate weakest category for RL
+  let weakest = 'None';
+  let highestErrCount = 0;
+  for (const [cat, count] of Object.entries(errorsByCategory)) {
+    if (count > highestErrCount) {
+      highestErrCount = count;
+      weakest = cat;
+    }
+  }
+
   return {
     totalExchanges: pilotMsgs.length,
     correctReadbacks: correct,
     errorsByCategory,
     commonMistakes: mistakes.slice(0, 5),
+    weakestCategory: weakest,
   };
 }

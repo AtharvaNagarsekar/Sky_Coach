@@ -47,14 +47,15 @@ export async function transcribeAudio(
   _priorLines: string[] = [],
   isSimulator: boolean = false
 ): Promise<TranscriptionResult> {
-  const whisperPrompt =
-    'ATC radio. Wilco. Roger. Affirm. Negative. Squawk four five two one. ' +
-    'Cleared for takeoff. Hold short. Line up and wait. Descend and maintain four thousand. ' +
-    'Niner. Two niner niner two. One seven left. Three five right. Radar contact.';
+  const whisperPrompt = isSimulator
+    ? 'Pilot readback. Wilco. Roger. Affirm. Negative. Niner. Tree. Fife. Two niner niner two. Squawk four five two one. Runway one seven left. Traffic in sight.'
+    : 'ATC radio. Wilco. Roger. Affirm. Negative. Squawk four five two one. ' +
+      'Cleared for takeoff. Hold short. Line up and wait. Descend and maintain four thousand. ' +
+      'Niner. Two niner niner two. One seven left. Three five right. Radar contact.';
 
   const formData = new FormData();
   formData.append('file', audioBlob, 'audio.webm');
-  formData.append('model', 'whisper-large-v3-turbo');
+  formData.append('model', 'whisper-large-v3');
   formData.append('language', 'en');
   formData.append('response_format', 'verbose_json');
   formData.append('prompt', whisperPrompt);
@@ -72,7 +73,18 @@ export async function transcribeAudio(
   }
 
   const data = await response.json();
-  const rawText: string = data.text || '';
+  const rawText: string = data?.text || '';
+  
+  if (!rawText.trim()) {
+    return { text: '', confidence: 0, duration: data?.duration || 0 };
+  }
+
+  // ── SIMULATOR: Skip ALL hallucination filters. Short ATC phrases like
+  // "Roger", "Wilco", "Cleared", "Niner" are valid and must NEVER be filtered.
+  // The LLM correction step (correctSimulatorReadback) handles accuracy downstream.
+  if (isSimulator) {
+    return { text: rawText, confidence: 0.9, duration: data?.duration || 0 };
+  }
 
   // Layer 1: Whisper's own no_speech_prob (bypass for simulator)
   if (!isSimulator && data.segments?.length > 0) {
@@ -123,6 +135,66 @@ export async function transcribeAudio(
 
   if (!isSimulator && confidence < 0.12) return { text: '', confidence: 0, duration: data.duration };
   return { text: rawText, confidence, duration: data.duration };
+}
+
+// ─── Simulator-dedicated transcription (matches Python whisper_readback_widget) ──
+// Step 1: Groq Whisper with aviation prompt → raw text
+// Step 2: Mistral corrects phonetics using expected readback context
+// NO hallucination filtering — every word the pilot says is valid training data.
+export async function transcribeForSimulator(
+  audioBlob: Blob,
+  expectedReadback: string = '',
+  callsign: string = ''
+): Promise<{ rawText: string; correctedText: string }> {
+  // Repeat callsign prominently — Whisper drops leading alphanumeric tokens
+  // (like N1234A) without sufficient context. Show callsign-first patterns.
+  const cs = callsign || 'N1234A';
+  const whisperPrompt =
+    `${cs}. ${cs}. ${cs}. ` +
+    `${cs}, ready to taxi. ${cs}, request pushback. ` +
+    `${cs}, Wilco. ${cs}, Roger. ${cs}, traffic in sight. ` +
+    'Niner. Tree. Fife. Squawk four five two one. ' +
+    'Runway two seven left. Cleared for takeoff. Hold short. ' +
+    (expectedReadback ? expectedReadback.slice(0, 100) : '');
+
+  const formData = new FormData();
+  formData.append('file', audioBlob, 'audio.webm');
+  formData.append('model', 'whisper-large-v3');
+  formData.append('language', 'en');
+  formData.append('response_format', 'json'); // Simple — just gives us {text}
+  formData.append('prompt', whisperPrompt);
+  formData.append('temperature', '0');
+
+  const response = await fetch(GROQ_WHISPER_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${GROQ_API_KEY}` },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Whisper error ${response.status}: ${err}`);
+  }
+
+  const data = await response.json();
+  const rawText: string = (data?.text || '').trim();
+
+  if (!rawText) {
+    return { rawText: '', correctedText: '' };
+  }
+
+  // Step 2: Mistral context-aware correction (same as Python's Mistral call)
+  let correctedText = rawText;
+  if (expectedReadback) {
+    try {
+      const corrected = await correctSimulatorReadback(rawText, expectedReadback, callsign);
+      if (corrected) correctedText = corrected;
+    } catch {
+      correctedText = rawText; // Fall back to raw on error
+    }
+  }
+
+  return { rawText, correctedText };
 }
 
 // ─── Phrase-level deduplication ───────────────────────────────────────────────
@@ -224,6 +296,56 @@ CORRECTION RULES (apply in order):
     return dedupePhrases(corrected);
   } catch (err) {
     console.error('Groq correction error:', err);
+    return rawText;
+  }
+}
+
+// ─── Simulator Context-Aware Correction ──────────────────────────────────────
+// Uses the expected readback to guide STT correction without cheating
+export async function correctSimulatorReadback(
+  rawText: string,
+  expectedReadback: string,
+  callsign: string
+): Promise<string> {
+  if (!rawText.trim() || !expectedReadback) return rawText;
+
+  const prompt = `You are an STT correction AI for an ATC simulator.
+The user's callsign is: ${callsign}.
+They were expected to say something similar to: "${expectedReadback}"
+
+The raw Whisper STT output was: "${rawText}"
+
+Your job is to fix phonetic mishearings in the raw STT using the expected readback as context.
+- DO NOT just copy the expected readback.
+- ONLY fix obvious STT garble (e.g. "three five" instead of "tree fife", "radar" instead of "roger").
+- If the user said something completely wrong, leave it wrong! We want to grade their mistakes.
+- Remove trailing hallucinations like "We'll see you next time" or "Thanks for watching" if they are clearly not part of the aviation radio call.
+- Output ONLY the corrected text.`;
+
+  try {
+    const response = await fetch(GROQ_CHAT_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'meta-llama/llama-4-maverick-17b-128e-instruct',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        max_tokens: 150,
+      }),
+    });
+
+    if (!response.ok) return rawText;
+    const data = await response.json();
+    const corrected: string = data.choices?.[0]?.message?.content?.trim() || rawText;
+    
+    // Safety check - if it erased everything, return original
+    if (corrected === '') return rawText;
+    return corrected.replace(/^"|"$/g, '');
+  } catch (e) {
+    console.error("Contextual correction failed", e);
     return rawText;
   }
 }
