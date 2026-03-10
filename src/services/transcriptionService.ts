@@ -48,7 +48,7 @@ export async function transcribeAudio(
   isSimulator: boolean = false
 ): Promise<TranscriptionResult> {
   const whisperPrompt = isSimulator
-    ? 'Pilot. Readback. Aviation radio. Niner. Tree. Fife. Roger. Wilco.'
+    ? 'Air India. Singapore. Southwest. United. Pilot readback. Aviation radio. Niner. Tree. Fife. Roger. Wilco.'
     : 'ATC radio. Wilco. Roger. Affirm. Negative. Squawk four five two one. ' +
       'Cleared for takeoff. Hold short. Line up and wait. Descend and maintain four thousand. ' +
       'Niner. Two niner niner two. One seven left. Three five right. Radar contact.';
@@ -277,18 +277,18 @@ export async function correctSimulatorReadback(
 ): Promise<string> {
   if (!rawText.trim() || !expectedReadback) return rawText;
 
-  const prompt = `You are an STT correction AI for an ATC simulator.
-The user's callsign is: ${callsign}.
-They were expected to say something similar to: "${expectedReadback}"
+  const prompt = `You are an expert aviation communications STT correction AI.
+USER CALLSIGN: "${callsign}"
+EXPECTED PHRASE: "${expectedReadback}"
+RAW WHISPER STT: "${rawText}"
 
-The raw Whisper STT output was: "${rawText}"
-
-Your job is to fix phonetic mishearings in the raw STT using the expected readback as context.
-- DO NOT just copy the expected readback.
-- ONLY fix obvious STT garble (e.g. "three five" instead of "tree fife", "radar" instead of "roger").
-- If the user said something completely wrong, leave it wrong! We want to grade their mistakes.
-- Remove trailing hallucinations like "We'll see you next time" or "Thanks for watching" if they are clearly not part of the aviation radio call.
-- Output ONLY the corrected text.`;
+STRICT CORRECTION RULES:
+1. CALLSIGN PRIORITY: Fix phonetic mishearings of the callsign "${callsign}" (e.g., "I am in the" -> "Air India", "Sail" -> "Singapore").
+2. NATO PHONETICS: Ensure NATO alphabet is used correctly (Alpha, Bravo, Charlie, Delta, Echo, Foxtrot, Golf, Hotel, India, Juliett, Kilo, Lima, Mike, November, Oscar, Papa, Quebec, Romeo, Sierra, Tango, Uniform, Victor, Whiskey, X-ray, Yankee, Zulu). Fix mishearings like "brave" to "Bravo" or "echoes" to "Echo".
+3. AVIATION PHRASEOLOGY: Standardize phrases like "Roger", "Wilco", "Affirm", "Negative", "Line up and wait", "Cleared for takeoff", "Hold short", "Traffic in sight".
+4. NUMBER FORMATTING: Use "niner" for 9, "tree" for 3, "fife" for 5. Formats: altitudes (e.g., "three thousand"), headings (e.g., "heading zero niner zero"), runways (e.g., "runway two seven left").
+5. PRESERVE INTENT: If the pilot says the wrong runway or altitude intentionally, keep the error, but fix the phonetics (e.g., if they said "runway two six" when expected was "two seven", keep "runway two six").
+6. OUTPUT: provide ONLY the corrected transcript. No conversation or labels.`;
 
   try {
     const response = await fetch(GROQ_CHAT_URL, {
