@@ -48,7 +48,7 @@ export async function transcribeAudio(
   isSimulator: boolean = false
 ): Promise<TranscriptionResult> {
   const whisperPrompt = isSimulator
-    ? 'Pilot readback. Wilco. Roger. Affirm. Negative. Niner. Tree. Fife. Two niner niner two. Squawk four five two one. Runway one seven left. Traffic in sight.'
+    ? 'Pilot. Readback. Aviation radio. Niner. Tree. Fife. Roger. Wilco.'
     : 'ATC radio. Wilco. Roger. Affirm. Negative. Squawk four five two one. ' +
       'Cleared for takeoff. Hold short. Line up and wait. Descend and maintain four thousand. ' +
       'Niner. Two niner niner two. One seven left. Three five right. Radar contact.';
@@ -79,15 +79,15 @@ export async function transcribeAudio(
     return { text: '', confidence: 0, duration: data?.duration || 0 };
   }
 
-  // ── SIMULATOR: Skip ALL hallucination filters. Short ATC phrases like
-  // "Roger", "Wilco", "Cleared", "Niner" are valid and must NEVER be filtered.
-  // The LLM correction step (correctSimulatorReadback) handles accuracy downstream.
+  // ── SIMULATOR BYPASS ───────────────────────────────────────────────────────
+  // For the simulator, we want to hear EVERY word the pilot says, 
+  // even if it's poor quality, noisy, or a short phrase like "Roger".
   if (isSimulator) {
     return { text: rawText, confidence: 0.9, duration: data?.duration || 0 };
   }
 
-  // Layer 1: Whisper's own no_speech_prob (bypass for simulator)
-  if (!isSimulator && data.segments?.length > 0) {
+  // Layer 1: Whisper's own no_speech_prob (Live ATC only)
+  if (data.segments?.length > 0) {
     const avgNoSpeech = data.segments.reduce(
       (s: number, seg: any) => s + (seg.no_speech_prob ?? 0), 0
     ) / data.segments.length;
@@ -118,7 +118,7 @@ export async function transcribeAudio(
   if (HALLUCINATION_PHRASES.has(normalized) || (words.length <= 1 && HALLUCINATION_PHRASES.has(words[0])))
     return { text: '', confidence: 0, duration: data.duration };
 
-  // Layer 3: Log-prob confidence
+  // LAYER 3: Log-prob confidence
   let confidence = 0.75;
   if (data.segments?.length > 0) {
     const avgLogProb = data.segments.reduce(
@@ -126,14 +126,12 @@ export async function transcribeAudio(
     ) / data.segments.length;
     confidence = Math.max(0.05, Math.min(1, Math.exp(avgLogProb) * 1.4));
     
-    // Only apply the repetition penalty to Live ATC (not simulator, where short phrases are common)
-    if (!isSimulator) {
-      const uniqueRatio = uniqueWords.size / (words.length || 1);
-      if (words.length > 4 && uniqueRatio < 0.4) confidence *= 0.2;
-    }
+    // Only apply the repetition penalty to Live ATC
+    const uniqueRatio = uniqueWords.size / (words.length || 1);
+    if (words.length > 4 && uniqueRatio < 0.4) confidence *= 0.2;
   }
 
-  if (!isSimulator && confidence < 0.12) return { text: '', confidence: 0, duration: data.duration };
+  if (confidence < 0.12) return { text: '', confidence: 0, duration: data.duration };
   return { text: rawText, confidence, duration: data.duration };
 }
 
@@ -146,40 +144,10 @@ export async function transcribeForSimulator(
   expectedReadback: string = '',
   callsign: string = ''
 ): Promise<{ rawText: string; correctedText: string }> {
-  // Repeat callsign prominently — Whisper drops leading alphanumeric tokens
-  // (like N1234A) without sufficient context. Show callsign-first patterns.
-  const cs = callsign || 'N1234A';
-  const whisperPrompt =
-    `${cs}. ${cs}. ${cs}. ` +
-    `${cs}, ready to taxi. ${cs}, request pushback. ` +
-    `${cs}, Wilco. ${cs}, Roger. ${cs}, traffic in sight. ` +
-    'Niner. Tree. Fife. Squawk four five two one. ' +
-    'Runway two seven left. Cleared for takeoff. Hold short. ' +
-    (expectedReadback ? expectedReadback.slice(0, 100) : '');
+  const result = await transcribeAudio(audioBlob, '', [], true);
+  const rawText: string = result.text.trim();
 
-  const formData = new FormData();
-  formData.append('file', audioBlob, 'audio.webm');
-  formData.append('model', 'whisper-large-v3');
-  formData.append('language', 'en');
-  formData.append('response_format', 'json'); // Simple — just gives us {text}
-  formData.append('prompt', whisperPrompt);
-  formData.append('temperature', '0');
-
-  const response = await fetch(GROQ_WHISPER_URL, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${GROQ_API_KEY}` },
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Whisper error ${response.status}: ${err}`);
-  }
-
-  const data = await response.json();
-  const rawText: string = (data?.text || '').trim();
-
-  if (!rawText) {
+  if (!rawText || result.confidence < 0.2) {
     return { rawText: '', correctedText: '' };
   }
 
@@ -333,7 +301,7 @@ Your job is to fix phonetic mishearings in the raw STT using the expected readba
         model: 'meta-llama/llama-4-maverick-17b-128e-instruct',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.1,
-        max_tokens: 150,
+        max_tokens: 300,
       }),
     });
 

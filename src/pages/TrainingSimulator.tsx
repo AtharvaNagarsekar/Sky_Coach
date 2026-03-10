@@ -254,10 +254,12 @@ export default function TrainingSimulator() {
   const [chainHistory, setChainHistory] = useState<Array<{ role: 'pilot' | 'atc' | 'situation'; text: string }>>([]);
   const [scenarioTraffic, setScenarioTraffic] = useState<ScenarioType>('Normal Traffic');
   const [fallbackText, setFallbackText] = useState('');
+  const [rawTranscription, setRawTranscription] = useState('');
   const [processingStatus, setProcessingStatus] = useState<string>('');
 
   const chatRef = useRef<HTMLDivElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -352,15 +354,33 @@ export default function TrainingSimulator() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       chunksRef.current = [];
-      const rec = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '' });
+
+      // Simplified High-Gain Pipeline (No aggressive filters)
+      const ctx = new AudioContext({ sampleRate: 16000 });
+      audioCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+
+      const gain = ctx.createGain();
+      gain.gain.value = 5.0; // High boost for clarity
+      const dest = ctx.createMediaStreamDestination();
+      
+      source.connect(gain);
+      gain.connect(dest);
+
+      const rec = new MediaRecorder(dest.stream, { 
+        mimeType: 'audio/webm' 
+      });
       rec.ondataavailable = e => e.data.size > 0 && chunksRef.current.push(e.data);
-      rec.start(100);
+      rec.start(); 
       recorderRef.current = rec;
+      
       setIsRecording(true);
       setError(null);
       setFallbackText('');
-    } catch {
-      alert('Microphone access required for the simulator.');
+      setRawTranscription('');
+    } catch (e) {
+      console.error('Mic start error:', e);
+      alert('Microphone access required.');
       setIsRecording(false);
     }
   };
@@ -374,44 +394,46 @@ export default function TrainingSimulator() {
     try {
       recorderRef.current.stop();
       streamRef.current?.getTracks().forEach(t => t.stop());
-    } catch(e) {}
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close().catch(() => {});
+        audioCtxRef.current = null;
+      }
+    } catch (e) { }
 
     // Wait for recorder to flush all chunks
-    await new Promise(res => setTimeout(res, 300));
+    await new Promise(res => setTimeout(res, 600));
     const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+    console.log(`[Simulator] Audio Captured: ${Math.round(blob.size / 1024)} KB`);
 
-    if (blob.size < 1000) {
-      setError('Audio too short. Please hold the button and speak clearly.');
-      setProcessingStatus('');
+    if (blob.size < 500) {
+      setError(`Audio too quiet/short (${blob.size} bytes). Please speak louder and wait 1 sec before releasing.`);
       setIsProcessing(false);
-      recorderRef.current = null;
+      setProcessingStatus('');
       return;
     }
 
     try {
-      setProcessingStatus('🎙️ Whisper transcribing...');
+      setProcessingStatus('🎙️ Transcribing...');
+      const { transcribeForSimulator } = await import('../services/transcriptionService');
       const { correctedText, rawText } = await transcribeForSimulator(
         blob,
         currentExpected,
         callsign
       );
 
-      if (!correctedText && !rawText) {
-        setError('No speech detected. Please speak louder or closer to the mic.');
-        setProcessingStatus('');
+      if (!rawText.trim()) {
+        setError('No speech detected. Try speaking louder.');
       } else {
         setProcessingStatus('✅ Done');
         setFallbackText(correctedText || rawText);
-        console.log('[Simulator STT] raw:', rawText, '→ corrected:', correctedText);
+        setRawTranscription(rawText);
       }
     } catch (e: any) {
       console.error('Transcription error:', e);
-      setError(`Transcription failed: ${e?.message || 'Unknown error'}. You can type your response instead.`);
-      setProcessingStatus('');
+      setError(`Transcription failed: ${e?.message}`);
     } finally {
       setIsProcessing(false);
-      recorderRef.current = null;
-      setTimeout(() => setProcessingStatus(''), 2500);
+      setTimeout(() => setProcessingStatus(''), 2000);
     }
   };
 
@@ -600,7 +622,7 @@ export default function TrainingSimulator() {
 
           {/* PTT Control exactly matching UI */}
           <div className="glass-panel" style={{ padding: '20px', marginTop: 16, flexShrink: 0, border: '1px solid rgba(255,255,255,0.08)' }}>
-            
+
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
               <h3 style={{ margin: 0, fontSize: '1.05rem', color: '#fff' }}>🎙 YOUR READBACK</h3>
               {(isRecording || processingStatus) && (
@@ -609,15 +631,15 @@ export default function TrainingSimulator() {
                 </span>
               )}
             </div>
-               <button
-                  className={`btn ${isRecording ? 'btn-danger' : 'btn-primary'} btn-lg`}
-                  style={{ width: '100%', justifyContent: 'center', fontFamily: 'Share Tech Mono', letterSpacing: '0.03em', fontSize: '0.95rem', padding: '16px', borderRadius: 8 }}
-                  onClick={isRecording ? stopRecordingAndProcess : startRecording}
-                  disabled={isATCTalking || isProcessing}
-                >
-                  {isRecording ? '▪ Click to Submit Voice' : '🎙️ VOICE READBACK — Whisper + Mistral Aviation Correction'}
-                </button>
-            
+            <button
+              className={`btn ${isRecording ? 'btn-danger' : 'btn-primary'} btn-lg`}
+              style={{ width: '100%', justifyContent: 'center', fontFamily: 'Share Tech Mono', letterSpacing: '0.03em', fontSize: '0.95rem', padding: '16px', borderRadius: 8 }}
+              onClick={isRecording ? stopRecordingAndProcess : startRecording}
+              disabled={isATCTalking || isProcessing}
+            >
+              {isRecording ? '▪ Click to Submit Voice' : '🎙️ VOICE READBACK — Whisper + Mistral Aviation Correction'}
+            </button>
+
             <div style={{ marginTop: 24 }}>
               <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: 8, fontWeight: 500 }}>
                 Or type / edit your readback:
@@ -630,8 +652,14 @@ export default function TrainingSimulator() {
                 onChange={e => setFallbackText(e.target.value)}
                 disabled={isATCTalking || isProcessing || isRecording}
               />
+              {rawTranscription && (
+                <div style={{ marginTop: 8, fontSize: '0.72rem', color: 'var(--text-muted)', fontStyle: 'italic', display: 'flex', gap: 6 }}>
+                  <span style={{ color: 'var(--cyan-primary)', fontWeight: 600 }}>RAW WHISPER:</span>
+                  <span>{rawTranscription}</span>
+                </div>
+              )}
             </div>
-            
+
             <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12, marginTop: 16 }}>
               <button
                 className="btn btn-primary"
@@ -641,11 +669,12 @@ export default function TrainingSimulator() {
               >
                 ✅ SUBMIT & EVALUATE
               </button>
-              
+
               <button
                 className="btn btn-ghost"
-                disabled={isATCTalking || isProcessing || isRecording}
+                disabled={isATCTalking || isProcessing || isRecording || !currentExpected}
                 style={{ background: 'rgba(255,255,255,0.05)', color: '#a8d8ea', fontWeight: 600, border: '1px solid rgba(168,216,234,0.3)' }}
+                onClick={() => setFallbackText(currentExpected)}
               >
                 🔁 SHOW ANSWER
               </button>
