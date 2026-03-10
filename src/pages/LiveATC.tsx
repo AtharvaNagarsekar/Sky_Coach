@@ -2,10 +2,18 @@ import { useRef, useEffect, useState, useCallback } from 'react';
 import Header from '../components/Header';
 import { ATCStreamCapture } from '../services/atcStream';
 import type { StreamStatus } from '../services/atcStream';
-import { transcribeAudio } from '../services/transcriptionService';
+import { transcribeAudio, refineTranscriptionWithGroq } from '../services/transcriptionService';
 import { formatATCTranscription } from '../services/formattingService';
 import type { ATCEntry } from '../services/formattingService';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+
+// Airport options (ICAO + LiveATC stream URL)
+const AIRPORTS = [
+  { id: 'KAUS', label: '🇺🇸 KAUS — Austin', streamUrl: 'https://s1-bos.liveatc.net/kaus3_app_dep' },
+  { id: 'WSSS', label: '🇸🇬 WSSS — Singapore', streamUrl: 'https://s1-bos.liveatc.net/wsss3' },
+  { id: 'EHAM', label: '🇳🇱 EHAM — Amsterdam', streamUrl: 'https://s1-bos.liveatc.net/eham_app_119055' },
+  { id: 'YMML', label: '🇦🇺 YMML — Melbourne', streamUrl: 'https://s1-bos.liveatc.net/ymml3' },
+];
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 function confidenceClass(conf: number): string {
@@ -60,11 +68,17 @@ export default function LiveATC() {
   const [stats, setStats] = useState({ total: 0, flags: 0, avgConf: 0, towerCount: 0, pilotCount: 0 });
   const [filterSpeaker, setFilterSpeaker] = useState<string>('ALL');
   const [error, setError] = useState<string | null>(null);
+  const [selectedAirport, setSelectedAirport] = useState(AIRPORTS[0]);
 
   const captureRef = useRef<ATCStreamCapture | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
   const processingQueue = useRef<Array<{ blob: Blob; ts: Date }>>([]);
   const processingRef = useRef(false);
+  /** Rolling buffer of last 8 corrected lines — fed to LLM for callsign/context grounding. */
+  const priorTranscripts = useRef<string[]>([]);
+  /** Warmup counter — first N chunks are silently processed for context only, not displayed. */
+  const warmupChunks = useRef(0);
+  const WARMUP_COUNT = 0;
 
   // Auto-scroll
   useEffect(() => {
@@ -90,12 +104,34 @@ export default function LiveATC() {
       const item = processingQueue.current.shift()!;
       setQueueLen(processingQueue.current.length);
       try {
+        // Step 1: Whisper → raw text
         const result = await transcribeAudio(item.blob);
-        if (!result.text.trim() || result.text.trim().length < 3) continue;
+        // Skip: empty, too short, or hallucination (confidence=0 means filter rejected it)
+        if (!result.text.trim() || result.text.trim().length < 8 || result.confidence === 0) continue;
 
-        const formatted = await formatATCTranscription(result.text, result.confidence);
+        // Step 2: Aviation Expert LLM → corrected text using airport context + prior lines
+        const refined = await refineTranscriptionWithGroq(
+          result.text,
+          selectedAirport.id,
+          priorTranscripts.current
+        );
+        if (!refined.trim()) continue; // LLM flagged as unintelligible noise
+
+        // Add corrected line to rolling context (keep last 8)
+        priorTranscripts.current = [...priorTranscripts.current.slice(-7), refined];
+
+        // Step 3: Mistral → structured ATCEntry with flags (+ conversation history for context)
+        const formatted = await formatATCTranscription(refined, result.confidence, priorTranscripts.current);
+
+        warmupChunks.current += 1;
+        // Suppress first N chunks — model is still building context and transcription errors are high
+        if (warmupChunks.current <= WARMUP_COUNT) {
+          console.debug(`Warmup chunk ${warmupChunks.current}/${WARMUP_COUNT} — suppressed from display`);
+          continue;
+        }
+
         if (formatted.length > 0) {
-          setEntries(prev => [...prev.slice(-200), ...formatted]); // Keep last 200
+          setEntries(prev => [...prev.slice(-200), ...formatted]);
           setConfidenceHistory(prev => [
             ...prev.slice(-30),
             { t: formatTime(item.ts), v: Math.round(formatted[0].confidence) },
@@ -108,7 +144,7 @@ export default function LiveATC() {
 
     processingRef.current = false;
     setIsProcessing(false);
-  }, []);
+  }, [selectedAirport]);
 
   const handleChunk = useCallback((chunk: { blob: Blob; timestamp: Date }) => {
     processingQueue.current.push({ blob: chunk.blob, ts: chunk.timestamp });
@@ -116,18 +152,32 @@ export default function LiveATC() {
     processQueue();
   }, [processQueue]);
 
+  const handleAirportChange = (id: string) => {
+    if (status !== 'idle' && status !== 'error') {
+      captureRef.current?.stop();
+      captureRef.current = null;
+    }
+    priorTranscripts.current = [];
+    setEntries([]);
+    setConfidenceHistory([]);
+    setError(null);
+    setSelectedAirport(AIRPORTS.find(a => a.id === id) || AIRPORTS[0]);
+  };
+
   const handleStart = async () => {
     setError(null);
     setEntries([]);
+    priorTranscripts.current = [];
+    warmupChunks.current = 0;
     captureRef.current = new ATCStreamCapture(
-      8000, // 8-second chunks
+      20000, // 20-second chunks — more context = better Whisper accuracy (matches Python experiment's 30s)
       handleChunk,
       (s) => {
         setStatus(s);
-        if (s === 'error') setError('Failed to connect to LiveATC stream. The stream may be offline or CORS proxy unavailable.');
+        if (s === 'error') setError(`Failed to connect to ${selectedAirport.id} stream. Stream may be offline or blocked by CORS.`);
       }
     );
-    await captureRef.current.start();
+    await captureRef.current.start(selectedAirport.streamUrl);
   };
 
   const handleStop = () => {
@@ -147,16 +197,26 @@ export default function LiveATC() {
 
   const filteredEntries = filterSpeaker === 'ALL'
     ? entries
-    : entries.filter(e => e.speaker === filterSpeaker || (['TOWER','APPROACH','DEPARTURE','GROUND'].includes(e.speaker) && filterSpeaker === 'ATC'));
+    : entries.filter(e => e.speaker === filterSpeaker || (['TOWER', 'APPROACH', 'DEPARTURE', 'GROUND'].includes(e.speaker) && filterSpeaker === 'ATC'));
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: 0 }}>
       <Header
         title="Live ATC Transcription"
-        subtitle="KAUS Austin–Bergstrom · Approach / Departure · 119.0 MHz"
+        subtitle={`${selectedAirport.label} · Live Radio`}
         statusLabel={status === 'live' ? 'LIVE' : status === 'connecting' ? 'CONNECTING...' : status === 'paused' ? 'PAUSED' : 'OFFLINE'}
         statusActive={status === 'live'}
       >
+        <select
+          className="input-field"
+          style={{ width: 'auto', fontSize: '0.8rem', padding: '6px 10px' }}
+          value={selectedAirport.id}
+          onChange={e => handleAirportChange(e.target.value)}
+          disabled={status === 'live' || status === 'connecting' || status === 'paused'}
+          title={status !== 'idle' && status !== 'error' ? 'Stop stream to change airport' : 'Select airport'}
+        >
+          {AIRPORTS.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+        </select>
         <select
           className="input-field"
           style={{ width: 'auto', fontSize: '0.8rem', padding: '6px 10px' }}

@@ -34,7 +34,7 @@ export class ATCStreamCapture {
     this.onStatus = onStatus;
   }
 
-  async start() {
+  async start(streamUrl = 'https://s1-bos.liveatc.net/kaus3_app_dep') {
     try {
       this.onStatus('connecting');
 
@@ -43,7 +43,7 @@ export class ATCStreamCapture {
       // The edge node (unlike the load balancer) sends Access-Control-Allow-Origin: *
       // This means we CAN use crossOrigin and the WebAudio API without being tainted!
       this.audioEl.crossOrigin = 'anonymous';
-      this.audioEl.src = 'https://s1-bos.liveatc.net/kaus3_app_dep';
+      this.audioEl.src = streamUrl;
       this.audioEl.volume = 1.0;
 
       // Re-enable Web Audio pipeline for transcription processing
@@ -73,7 +73,7 @@ export class ATCStreamCapture {
       lp.connect(this.gainNode);
       this.gainNode.connect(this.dest);
       this.gainNode.connect(this.audioCtx.destination); // For listening
-      
+
       // Start recorder (it will successfully record and chunk stream audio now!)
       this.recorder = new MediaRecorder(this.dest.stream, {
         mimeType: this.getSupportedMimeType(),

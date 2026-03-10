@@ -309,7 +309,7 @@ export default function TrainingSimulator() {
     const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
 
     try {
-      const result = await transcribeAudio(blob);
+      const result = await transcribeAudio(blob, '', [], true); // true = isSimulator
       if (!result.text.trim()) { setIsProcessing(false); return; }
 
       const pilotMsg: ConversationMessage = { id: uuid(), role: 'pilot', text: result.text, timestamp: new Date() };
