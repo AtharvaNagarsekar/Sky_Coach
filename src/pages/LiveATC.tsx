@@ -16,6 +16,25 @@ const AIRPORTS = [
 ];
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
+function getCurrentISTInitialAirport() {
+  const now = new Date();
+  // UTC time
+  const utcHours = now.getUTCHours();
+  const utcMinutes = now.getUTCMinutes();
+  
+  // IST is UTC + 5:30
+  let istMinutes = utcMinutes + 30;
+  let istHours = utcHours + 5 + Math.floor(istMinutes / 60);
+  istMinutes %= 60;
+  istHours %= 24;
+
+  // 8 AM IST (8) to 8 PM IST (20)
+  const isDaytimeIST = istHours >= 8 && istHours < 20;
+  
+  // Melbourne is AIRPORTS[3], KAUS is AIRPORTS[0]
+  return isDaytimeIST ? AIRPORTS[3] : AIRPORTS[0];
+}
+
 function confidenceClass(conf: number): string {
   if (conf >= 75) return 'conf-high';
   if (conf >= 45) return 'conf-medium';
@@ -68,7 +87,7 @@ export default function LiveATC() {
   const [stats, setStats] = useState({ total: 0, flags: 0, avgConf: 0, towerCount: 0, pilotCount: 0 });
   const [filterSpeaker, setFilterSpeaker] = useState<string>('ALL');
   const [error, setError] = useState<string | null>(null);
-  const [selectedAirport, setSelectedAirport] = useState(AIRPORTS[0]);
+  const [selectedAirport, setSelectedAirport] = useState(getCurrentISTInitialAirport());
 
   const captureRef = useRef<ATCStreamCapture | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
@@ -170,7 +189,7 @@ export default function LiveATC() {
     priorTranscripts.current = [];
     warmupChunks.current = 0;
     captureRef.current = new ATCStreamCapture(
-      20000, // 20-second chunks — more context = better Whisper accuracy (matches Python experiment's 30s)
+      12000, // 12-second chunks — better for separating speakers while keeping context
       handleChunk,
       (s) => {
         setStatus(s);

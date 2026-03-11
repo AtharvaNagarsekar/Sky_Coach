@@ -48,10 +48,8 @@ export async function transcribeAudio(
   isSimulator: boolean = false
 ): Promise<TranscriptionResult> {
   const whisperPrompt = isSimulator
-    ? 'Air India. Singapore. Southwest. United. Pilot readback. Aviation radio. Niner. Tree. Fife. Roger. Wilco.'
-    : 'ATC radio. Wilco. Roger. Affirm. Negative. Squawk four five two one. ' +
-      'Cleared for takeoff. Hold short. Line up and wait. Descend and maintain four thousand. ' +
-      'Niner. Two niner niner two. One seven left. Three five right. Radar contact.';
+    ? 'Air India, Singapore, Southwest, United, pilot, readback, niner, tree, fife, roger, wilco'
+    : 'ATC, live, radio, aviation, phraseology, niner, tree, fife, roger, wilco, affirm, negative, squawk, alpha, bravo, charlie, runway, flight, landing, takeoff, contact, maintaining, climb, decend, traffic';
 
   const formData = new FormData();
   formData.append('file', audioBlob, 'audio.webm');
@@ -91,7 +89,8 @@ export async function transcribeAudio(
     const avgNoSpeech = data.segments.reduce(
       (s: number, seg: any) => s + (seg.no_speech_prob ?? 0), 0
     ) / data.segments.length;
-    if (avgNoSpeech > 0.6) return { text: '', confidence: 0, duration: data.duration };
+    // Reject if too likely to be silence/static
+    if (avgNoSpeech > 0.45) return { text: '', confidence: 0, duration: data.duration };
   }
 
   // Layer 2: Known hallucination patterns
@@ -114,9 +113,14 @@ export async function transcribeAudio(
     'bye', 'good bye', 'goodbye', 'hello', 'hi',
     'music', 'laughter', 'applause', 'silence',
     'subtitles by', 'transcribed by', 'www', 'http',
+    'thank you for watching', 'thanks for watching', 'watching',
   ]);
-  if (HALLUCINATION_PHRASES.has(normalized) || (words.length <= 1 && HALLUCINATION_PHRASES.has(words[0])))
+  
+  if (HALLUCINATION_PHRASES.has(normalized) || 
+      (words.length <= 3 && words.some(w => HALLUCINATION_PHRASES.has(w))) ||
+      /^[^a-zA-Z0-9]+$/.test(normalized)) { // Reject purely symbol lines
     return { text: '', confidence: 0, duration: data.duration };
+  }
 
   // LAYER 3: Log-prob confidence
   let confidence = 0.75;

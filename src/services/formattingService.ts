@@ -29,42 +29,72 @@ export interface ATCEntry {
 
 // ─── Parse Mistral's [ATC] / [PILOT – Callsign] plain-text output into ATCEntry[] ──
 // Strip parenthetical analysis commentary that Mistral sometimes adds to messages
-function stripAnalysis(line: string): string {
-  // Remove anything in (parens) that contains analysis keywords
-  return line
-    .replace(/\s*\([^)]{30,}\)/g, '') // long parenthetical notes
-    .replace(/\s*\(ATC[^)]*\)/gi, '')  // (ATC did not issue...)
-    .replace(/\s*\(Missing[^)]*\)/gi, '') // (Missing readback...)
-    .replace(/\s*\(Note:[^)]*\)/gi, '')   // (Note: ...)
-    .replace(/\s*\(This[^)]*\)/gi, '')    // (This appears to be...)
+// Strip all AI commentary, notes, and analysis from the spoken text.
+function stripAnalysis(text: string): string {
+  if (!text) return '';
+  
+  // 1. Hard Cut: If we see these markers, everything after is AI meta-talk. Delete it.
+  const cutPoints = [
+    /###/g, 
+    /\*\*Validation:?\*\*/gi, /Validation:/gi,
+    /\*\*Notes?:?\*\*/gi, /Notes?:/gi,
+    /\*\*Analysis:?\*\*/gi, /Analysis:/gi,
+    /Processing Notes?:/gi,
+    /Confidence:/gi
+  ];
+  
+  let cleaned = text;
+  for (const regex of cutPoints) {
+    const match = cleaned.split(regex);
+    if (match.length > 1) cleaned = match[0]; // Take only the part before the marker
+  }
+
+  return cleaned
+    .replace(/\s*\([^)]{10,}\)/g, '') // Remove any remaining parenthetical notes
+    .replace(/\s*\(ATC[^)]*\)/gi, '')
+    .replace(/\s*\(PILOT[^)]*\)/gi, '')
+    .replace(/thank you for watching|thanks for watching/gi, '')
+    .replace(/---|\*\*|\.\.\.|\*\*\*/g, '') // Remove clutter symbols
+    .replace(/\[ATC\]|\[PILOT[^\]]*\]/gi, '') // Strip stray tags
+    .replace(/\s{2,}/g, ' ')
     .trim();
 }
 
 // Lines that are Mistral meta-output, not actual radio transmissions
 const META_LINE_PATTERNS = [
-  /^here is/i, /^structured analysis/i, /^the following/i,
-  /^transcript:/i, /^output:/i, /^analysis:/i,
-  /^note:/i, /^\(confidence:/i,
+  /^here is/i, /^structured analysis/i, /^the following/i, /^processed output/i,
+  /^transcript:/i, /^output:/i, /^analysis:/i, /^based on/i, /^validation/i,
+  /^note:/i, /^\(confidence:/i, /^strictly follow/i, /^###/i,
 ];
 
 function parsePlainTextOutput(text: string, rawInput: string, baseConfidence: number): ATCEntry[] {
   const entries: ATCEntry[] = [];
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  
+  // Pre-process: If Mistral put tags mid-paragraph, force them onto new lines
+  const normalizedText = text
+    .replace(/(\[ATC\])/gi, '\n$1')
+    .replace(/(\[PILOT[^\]]*\])/gi, '\n$1');
+
+  const lines = normalizedText.split('\n').map(l => l.trim()).filter(Boolean);
 
   let currentSpeaker: SpeakerType = 'UNKNOWN';
   let currentCallsign = 'UNKNOWN';
   let currentLines: string[] = [];
   let hasMiscomm = false;
+  let pendingFlags: ATCEntry['flags'] = [];
 
   const flush = () => {
     if (currentLines.length === 0) return;
-    // Join and strip any analysis commentary that slipped in
-    const message = currentLines
-      .map(stripAnalysis)
-      .filter(l => l.length > 1)
-      .join(' ')
-      .trim();
-    if (!message || message.length < 2) return;
+    
+    // Join and apply the Nuclear Scrubber
+    const joined = currentLines.join(' ');
+    const message = stripAnalysis(joined);
+
+    // Reject entries that are too short or purely symbolic
+    if (!message || message.length < 3 || !/[a-zA-Z0-9]/.test(message)) {
+      currentLines = [];
+      return;
+    }
 
     const lc = message.toLowerCase();
     let type: ATCEntry['type'] = 'other';
@@ -74,31 +104,31 @@ function parsePlainTextOutput(text: string, rawInput: string, baseConfidence: nu
       type = 'readback';
       if (lc.includes('request') || lc.includes('able to') || lc.includes('would you')) type = 'request';
     } else {
-      // ATC sub-type
       if (lc.includes('cleared') || lc.includes('descend') || lc.includes('climb') ||
         lc.includes('squawk') || lc.includes('heading') || lc.includes('contact')) type = 'clearance';
       else if (lc.includes('traffic') || lc.includes('wind') || lc.includes('precipitation') ||
         lc.includes('information') || lc.includes('expect')) type = 'information';
     }
 
-    if (hasMiscomm) {
+    if (pendingFlags.length > 0) {
+      flags = [...pendingFlags];
+      pendingFlags = [];
+    } else if (hasMiscomm) {
       flags.push({
         type: 'FALSE_READBACK',
-        description: 'Possible mismatch between ATC instruction and pilot readback',
+        description: 'Discrepancy detected in transmission',
         severity: 'high',
         confidence: 80,
       });
       hasMiscomm = false;
     }
 
-    // Determine ATC facility type
     if (currentSpeaker !== 'PILOT' && currentSpeaker !== 'UNKNOWN') {
-      const m = lc;
-      if (m.includes('tower') || m.includes('cleared to land') || m.includes('cleared for takeoff') || m.includes('line up')) {
+      if (lc.includes('tower') || lc.includes('cleared to land') || lc.includes('cleared for takeoff') || lc.includes('line up')) {
         currentSpeaker = 'TOWER';
-      } else if (m.includes('departure') || (m.includes('climb') && !m.includes('tower'))) {
+      } else if (lc.includes('departure') || (lc.includes('climb') && !lc.includes('tower'))) {
         currentSpeaker = 'DEPARTURE';
-      } else if (m.includes('ground') || m.includes('taxi')) {
+      } else if (lc.includes('ground') || lc.includes('taxi')) {
         currentSpeaker = 'GROUND';
       }
     }
@@ -119,23 +149,21 @@ function parsePlainTextOutput(text: string, rawInput: string, baseConfidence: nu
   };
 
   for (const line of lines) {
-    // Match [ATC] header
+    // Process tags at the start of lines (after our normalization)
     if (/^\[ATC\]/i.test(line)) {
       flush();
-      currentSpeaker = 'APPROACH'; // generic ATC — sub-typed during flush
+      currentSpeaker = 'APPROACH';
       currentCallsign = 'ATC';
       const rest = line.replace(/^\[ATC\]/i, '').trim();
       if (rest) currentLines.push(rest);
       continue;
     }
 
-    // Match [PILOT – Callsign] or [PILOT - Callsign] or [PILOT]
     const pilotMatch = /^\[PILOT[\s–\-]+([^\]]+)\]/i.exec(line) || /^\[PILOT\]/i.exec(line);
     if (pilotMatch) {
       flush();
       currentSpeaker = 'PILOT';
       currentCallsign = pilotMatch[1]?.trim() || 'UNKNOWN';
-      // Sanitise: callsigns are airline names + numbers, not frequencies/altitudes/headings
       if (/^\d{3,5}$/.test(currentCallsign.replace(/\s/g, '')) ||
         currentCallsign.toLowerCase().includes('point') ||
         currentCallsign.toLowerCase() === 'unknown') {
@@ -146,23 +174,31 @@ function parsePlainTextOutput(text: string, rawInput: string, baseConfidence: nu
       continue;
     }
 
-    // Skip Mistral meta/intro lines (e.g. "Here is the structured analysis:")
     if (META_LINE_PATTERNS.some(p => p.test(line))) continue;
 
-    // Miscomm flag line
-    if (/POSSIBLE MISCOMM|⚠/i.test(line)) {
+    const detailedFlagMatch = /^(?:⚠|POSSIBLE MISCOMM):?\s*\[([^\]]+)\]\s*(.*)/i.exec(line) ||
+                             /^(?:⚠|POSSIBLE MISCOMM):?\s*(.*)/i.exec(line);
+    if (detailedFlagMatch) {
+      const desc = (detailedFlagMatch[2] || detailedFlagMatch[1] || '').toLowerCase();
+      if (desc.includes('no discrepancies') || desc.includes('no error') || desc.includes('correct match')) {
+        continue;
+      }
+
       hasMiscomm = true;
+      const typeStr = detailedFlagMatch[1]?.toUpperCase() || 'FALSE_READBACK';
+      const type: FlagType = (typeStr.includes('CALLSIGN') ? 'WRONG_CALLSIGN' : 
+                             typeStr.includes('INCOMPLETE') ? 'READBACK_INCOMPLETE' : 
+                             'FALSE_READBACK') as FlagType;
+
+      pendingFlags.push({
+        type,
+        description: (detailedFlagMatch[2] || detailedFlagMatch[1] || 'Discrepancy detected').trim(),
+        severity: 'high',
+        confidence: 85
+      });
       continue;
     }
 
-    // Confidence line — extract %
-    const confMatch = /\(Confidence:\s*(\d+)%\)/i.exec(line);
-    if (confMatch) continue; // skip — we use Whisper confidence directly
-
-    // Skip separator lines
-    if (/^[-=*]+$/.test(line)) continue;
-
-    // Regular content line — append to current speaker
     currentLines.push(line);
   }
 
@@ -178,89 +214,52 @@ export async function formatATCTranscription(
 ): Promise<ATCEntry[]> {
   if (!rawText.trim() || rawText.length < 5) return [];
 
-  const contextBlock = priorLines.length > 0
-    ? `\nRecent conversation context (use to identify active callsigns and expected readbacks):\n${priorLines.slice(-5).map((l, i) => `${i + 1}. ${l}`).join('\n')}\n`
+  const historyBlock = priorLines.length > 0
+    ? `\nPREVIOUS HISTORY (FOR CONTEXT ONLY - DO NOT REPEAT THESE IN YOUR OUTPUT):\n${priorLines.slice(-4).map((l, i) => `${i + 1}. ${l}`).join('\n')}\n`
     : '';
 
   const prompt = `You are analyzing live ATC radio communication.
-${contextBlock}
-PHRASEOLOGY INTELLIGENCE RULES:
-
-- Messages starting with callsign followed by frequency/altitude are likely ATC.
-- "Expect runway", "Cleared", "Descend and maintain", "Climb and maintain",
-  "Turn left/right", "Contact", "Traffic" are typically ATC instructions.
-- "With you", "Descending", "Climbing", "Cleared visual",
-  repetition of altitude/runway/frequency is typically pilot readback.
-- Callsign repeated at end is usually pilot readback.
-- Traffic advisories, weather warnings, wind info = ALWAYS ATC, never pilot.
-- Pilots commonly abbreviate frequencies (drop the leading "1") — this is NORMAL.
+${historyBlock}
 
 TASKS:
+1. Split the "NEW RAW TRANSCRIPT" into [ATC] and [PILOT – Callsign] segments.
+2. DIARIZATION STRATEGY: Aviation audio is typically a Clear Command -> Echo Readback.
+   - If a phrase or instruction is repeated (e.g. "Runway 27... Runway 27"), split them. The second one is ALWAYS the [PILOT].
+   - If a callsign appears at the end of a message (e.g. "...Southwest 321"), the preceding sentence belongs to that Pilot.
+   - Separate segments at speaker switches: acknowledgments ("Roger", "Wilco"), tone shifts (Instruction to Repetition), or when "Sir/Ma'am" is used.
+3. CLEAN TRANSCRIPT: Your [ATC] and [PILOT] output must contain ONLY the spoken words.
+   - ⚠ CRITICAL: Do NOT include notes, corrections, explanations, or meta-talk inside the [ATC] or [PILOT] blocks.
+4. VALIDATE READBACK: Compare the pilot's readback in the "NEW RAW TRANSCRIPT" against the instructions in "PREVIOUS HISTORY".
+   - ⚠ RELAXATION: If a pilot reads back a number (Altitude, Heading, Runway, QNH, Squawk) that ATC issued in the "PREVIOUS HISTORY", it is CORRECT. 
+   - NEVER flag it as "only referenced in history" — that is the primary point of a readback validation.
+5. FLAG DISCREPANCIES: ONLY if you find a genuine MISMATCH or CONTRADICTION between history and readback.
+   - ⚠ CRITICAL: If the readback matches the history, do NOT output a flag line.
+   - ⚠ CRITICAL: Do NOT output "No discrepancies detected" or "Correct". 
+ 
+STRICT DIARIZATION RULES:
+- Example: "Southwest 321 cleared for takeoff cleared for takeoff southwest 321" 
+  SHOULD BE: 
+  [ATC] Southwest 321 cleared for takeoff.
+  [PILOT - Southwest 321] Cleared for takeoff, southwest 321.
 
-1. Split conversation into [ATC] and [PILOT – Callsign if identifiable]
-2. Correct only obvious recognition errors.
-3. Do NOT paraphrase or rewrite valid phraseology.
-4. Compare ATC instructions vs pilot readbacks — check that KEY NUMBERS match.
-5. ⚠ POSSIBLE MISCOMM when:
-   • A NUMBER is WRONG (Altitude, Heading, Frequency, Squawk, Runway).
-   • A CRITICAL number is MISSING (e.g. ATC gives altitude/runway, pilot forgets it).
-   • The CALLSIGN is WRONG (ATC addressed Delta 1722, but a different pilot reads back).
-   • The command is CONTRADICTORY (e.g. ATC says "Hold short", pilot says "Crossing").
-
-   EXAMPLES OF FLAGS:
-   • Runway number: ATC "one eight right" → pilot "one seven left" = FLAG
-   • Missing Runway: ATC "cleared to land runway one eight right" → pilot "cleared to land" = FLAG
-   • Altitude: ATC "four thousand" → pilot "three thousand" = FLAG
-   • Heading: ATC "two eight zero" → pilot "two six zero" = FLAG
-   • Frequency: ATC "one two one point zero" → pilot "one two zero point five" = FLAG
-
-   PARAPHRASING THE SAME CLEARANCE IS NOT A FLAG:
-   • ATC "cleared visual approach runway one eight right" → pilot "go for the visual one eight right" = CORRECT, no flag
-   • ATC "contact tower one two one point zero" → pilot "over to tower one two one point zero" = CORRECT, no flag
-   • ATC "traffic in sight" → pilot "got the American in sight" = CORRECT, no flag
-   IF ALL NUMBERS AND THE CALLSIGN IN THE READBACK MATCH THE CLEARANCE → write nothing, no flag.
-
-
-   NEVER FLAG THESE — they are normal, standard pilot speech:
-   • "Good day" / "Good evening" / "Good morning" — informal but universally accepted closings
-   • "We have info [letter]" / "Have info Lima" / "Information Alpha" — pilot proactively reporting ATIS received, NOT a readback
-   • "With you" / "With you at [altitude]" — pilot check-in, always correct
-   • Pilot reporting field/traffic in sight — proactive information, not a readback
-   • Pilot saying "number two" / "number three" — position acknowledgement, not a readback error
-
-6. If normal correct exchange → no flag.
-
-CRITICAL MESSAGE RULES:
-- Each message MUST contain ONLY the exact words spoken on the radio.
-- Do NOT add parenthetical explanations, analysis, notes, or commentary inside or after a message.
-- Do NOT explain why something is a flag — put only the spoken words in the message.
-- Analysis and reasoning are FORBIDDEN in the output — only formatted radio speech.
-
-CALLSIGN RULES:
-- Callsigns are airline telephony names + flight numbers: "United 456", "Delta 1722", "Southwest 1851"
-- Never use squawk codes, altitudes, headings, or frequencies as callsigns
-- USE CONVERSATION HISTORY TO INFER CALLSIGNS:
-  • If ATC just addressed "Delta 1722" and the next pilot response has no callsign stated, the pilot is still "Delta 1722"
-  • If history shows only one active aircraft, all pilot transmissions belong to that aircraft
-  • Only use "Unknown" if the callsign genuinely cannot be determined from text or history
-- Pilots often drop callsign in short responses ("Roger", "We got the field in sight") — use history to fill in
-
-OUTPUT FORMAT (strictly follow this structure):
+OUTPUT FORMAT:
 
 [ATC]
-Message here.
+The spoken words here.
 
-[PILOT – Callsign or Unknown]
-Message here.
+[PILOT – Callsign]
+The spoken words here.
 
-If another transmission follows, continue on new lines.
-Do NOT put multiple speakers on the same line.
+⚠ [TYPE] Detailed description of what was wrong. (ONLY OUTPUT THIS IF THERE IS AN ACTUAL ERROR).
 
-At end write:
 (Confidence: XX%)
 
-Transcript:
-${rawText}`;
+STRICT REPETITION RULES:
+1. ONLY process the transcript below.
+2. NEVER re-output lines from history.
+
+NEW RAW TRANSCRIPT TO PROCESS:
+${rawText} (Analyze only this text, split ATC/Pilot if both are present)`;
 
   try {
     const response = await fetch(MISTRAL_URL, {
