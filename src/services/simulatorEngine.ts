@@ -66,9 +66,106 @@ export interface SessionStats {
   weakestCategory: string; // Used by RL Engine
 }
 
+// Phase-specific ATC rules injected into the system context.
+// Tells the LLM what is and is not appropriate for each scenario phase.
+const PHASE_RULES: Record<string, string> = {
+  parked: `
+GROUND PHASE RULES (aircraft is parked at gate, engines off):
+- NEVER mention altitude — aircraft is on the ground.
+- ATC/Clearance delivery issues IFR clearance: route, squawk code, initial altitude, departure frequency.
+- Standard format: "[Callsign], cleared to [destination] via [SID/route], maintain [initial alt], expect [cruise alt] ten minutes after departure, departure frequency [freq], squawk [code]."
+- Pilot reads back: ALL items — destination, route, initial altitude, expect altitude, frequency, squawk, callsign.`,
+
+  pushback: `
+GROUND PHASE RULES (pushback and engine start):
+- NEVER mention altitude — aircraft is on the ground.
+- Ground control issues pushback clearance with direction and face-to heading.
+- Format: "[Callsign], push back approved, [direction], face [heading/direction]."
+- May include: "start [engines] at your discretion."
+- Pilot reads back: pushback direction, face heading, callsign.`,
+
+  taxi_out: `
+GROUND PHASE RULES (taxiing to runway):
+- NEVER say "say altitude" — aircraft is on the ground. Say "say position" or "say your location" instead.
+- NEVER ask for altitude — ask for TAXIWAY POSITION (e.g., "say position on Alpha").
+- ATC issues taxi to runway via specific taxiways. Example: "[Callsign], taxi to runway 36R via Alpha, Bravo, hold short of runway 18L."
+- For lost aircraft: ATC asks "Say your position" or "Confirm your location", then issues corrected taxi instructions.
+- Pilot reads back: runway, taxi route (taxiway letters), hold short points, callsign.`,
+
+  taxi_in: `
+GROUND PHASE RULES (taxiing to gate after landing):
+- NEVER mention altitude.
+- Ground control issues taxi to gate via taxiways.
+- Format: "[Callsign], taxi to gate [X] via [taxiways], hold short of [crossing runway if any]."
+- Pilot reads back: gate number, taxi route, any hold-short instructions, callsign.`,
+
+  departure: `
+DEPARTURE PHASE RULES (takeoff and initial climb):
+- Tower issues takeoff clearance with wind and any initial heading/SID.
+- Format: "[Callsign], wind [dir] at [kts], runway [XX], cleared for takeoff." or with heading: "fly runway heading."
+- After airborne, may instruct: "contact Departure on [freq]."
+- Pilot reads back: runway, "cleared for takeoff" or heading if given, callsign. On frequency change: repeat frequency, callsign.`,
+
+  climb: `
+CLIMB PHASE RULES (climbing out with Departure Control):
+- Departure issues climb clearances, headings, and frequency changes.
+- Altitude format: "climb and maintain [altitude]" or "climb and maintain flight level [XXX]."
+- Heading format: "fly heading [XXX]" — always three digits.
+- Frequency change: "contact [facility] on [freq.decimal]."
+- Pilot reads back: altitude/FL, heading (if given), frequency (if given), callsign.`,
+
+  cruise: `
+EN-ROUTE / CRUISE PHASE RULES:
+- Center issues altitude amendments, routing changes, frequency changes.
+- Use Flight Level format above FL180: "maintain flight level [XXX]."
+- Below FL180 use feet: "maintain [altitude]."
+- Pilot reads back: altitude or FL, new routing if given, callsign.`,
+
+  descend: `
+DESCENT / APPROACH PHASE RULES:
+- Approach control issues descent clearance, speed control, vectors.
+- Format: "descend and maintain [altitude]", "reduce speed to [kts]", "fly heading [XXX], vectors ILS runway [XX]."
+- Altimeter setting must be given: "altimeter [QNH]."
+- Pilot reads back: altitude, speed if given, heading, ILS runway, altimeter setting, callsign.`,
+
+  arrival: `
+ARRIVAL / ILS PHASE RULES:
+- Approach issues ILS clearance with localiser intercept heading and cleared altitude.
+- Format: "[Callsign], turn [heading], maintain [altitude] until established, cleared ILS runway [XX] approach."
+- Pilot reads back: heading, altitude until established, "cleared ILS runway [XX]", callsign.`,
+
+  hold: `
+HOLDING PATTERN RULES:
+- ATC issues holding clearance with fix, direction, inbound course, leg time/distance, expect further clearance time (EFC).
+- ICAO standard format: "[Callsign], hold [direction] of [fix] on the [bearing] degree radial, [left/right] turns, [X]-minute legs, expect further clearance at [time]."
+- Pilot reads back: fix, direction of hold, radial, turn direction, leg time, EFC time, callsign.`,
+
+  emergency_weather: `
+WEATHER DEVIATION EMERGENCY RULES:
+- Pilot declares deviation (not necessarily MAYDAY unless structural).
+- Pilot format: "[Callsign], request deviation [left/right] of course [XX] miles due to weather."
+- ATC responds: "[Callsign], deviation approved, report clear of weather" or with re-routing.
+- Do NOT issue altitude unless needed for terrain separation.`,
+
+  emergency_medical: `
+MEDICAL EMERGENCY RULES:
+- Pilot declares MAYDAY: "MAYDAY MAYDAY MAYDAY, [callsign], medical emergency, [POB if known], request immediate landing."
+- ATC responds: "[Callsign], roger MAYDAY, cleared to [airport/runway], descend and maintain [alt], [emergency services notified]."
+- ATC should ask: "Number of persons on board?" and "Fuel state?"`,
+
+  emergency_traffic: `
+TCAS / TRAFFIC ALERT RULES:
+- TCAS RA (Resolution Advisory) takes priority over ATC instructions.
+- If TCAS RA active, pilot says: "[Callsign], TCAS RA, [climbing/descending]."
+- ATC acknowledges: "[Callsign], roger, TCAS RA." ATC does NOT issue conflicting instructions during RA.
+- After RA resolved: "[Callsign], TCAS RA resolved, returning to [cleared altitude]."`,
+};
+
 export function buildSessionContext(situation: Situation | string, callsign: string, customTopic = ''): string {
   const cfg = SITUATIONS[situation];
   const ctx = cfg ? cfg.context : customTopic;
+  const phaseRules = PHASE_RULES[situation] ?? '';
+
   return `
 Airport: Austin-Bergstrom International Airport (KAUS / AUS)
 Active Runway: 18L/36R
@@ -77,34 +174,82 @@ Aircraft Callsign: ${callsign}
 Aircraft Type: Boeing 737-800
 Situation: ${ctx}
 Current Phase: ${cfg ? cfg.label : customTopic}
+${phaseRules}
 `.trim();
 }
 
 
 
-const VALIDATION_SYSTEM_PROMPT = `You are an expert aviation radio communications instructor evaluating a pilot's readback against an ATC clearance.
 
-Analyze the pilot's readback and return ONLY valid JSON with this structure:
+const VALIDATION_SYSTEM_PROMPT = `You are a senior ICAO-certified ATC instructor evaluating a pilot's radio readback against a clearance.
+
+Return ONLY valid JSON with this exact structure:
 {
   "isCorrect": boolean,
-  "errors": [
-    {
-      "item": "what item was wrong",
-      "given": "what pilot said",
-      "expected": "what should have been said",
-      "category": "callsign|altitude|heading|frequency|squawk|speed|runway|phraseology|other"
-    }
-  ],
-  "correctReadback": "the complete correct readback in ICAO format",
+  "errors": [],
+  "correctReadback": "the complete correct readback in ICAO standard format",
   "score": <0-100 integer>,
-  "feedback": "one concise sentence of instructor feedback"
+  "feedback": ""
 }
 
-Rules:
-- Only flag ERRORS in readback (wrong values, missing items, wrong callsign)
-- Do NOT penalize for slight wording variations that don't change meaning
-- score = 100 if perfect, subtract 15 per error, minimum 0
-- correctReadback should include callsign first, then all required items`;
+=== CORE PHILOSOPHY: BE GENEROUS — PENALISE ONLY REAL SAFETY-CRITICAL OMISSIONS ===
+
+--- MANDATORY READBACK ITEMS (check ALL that appear in the clearance) ---
+The pilot MUST read back:
+- All ALTITUDES / FLIGHT LEVELS (e.g. "climb and maintain 8,000", "FL250")
+- All HEADINGS (e.g. "fly heading 270")
+- All RUNWAYS (e.g. "cleared to land runway 18L")
+- All SQUAWK CODES (e.g. "squawk 4521")
+- All FREQUENCY CHANGES (e.g. "contact Departure 124.0")
+- The CALLSIGN (own aircraft identifier)
+- Clearance limit / routing if given
+For each such item in the ATC clearance, verify it appears in the readback. If any mandatory item is MISSING, add it to errors.
+
+--- CALLSIGN RECOGNITION — ABSOLUTE BAN ON CALLSIGN ERRORS ---
+NEVER add a callsign error. The only reason to ever flag callsign is if a completely different aircraft responded.
+All of these formats are IDENTICAL and 100% correct:
+  - Full phonetic: "November 1234 Alpha" = "N1234A" ✓
+  - Spoken digits:  "November twelve thirty four alpha" = "N1234A" ✓
+  - Mixed:          "N1234 Alpha" = "N1234A" ✓
+  - Shortened:      "34 Alpha" or "1234A" (abbreviated callsign, standard practice) ✓
+  - Airline codes:  "AI171" = "Air India 171" = "Air India one seven one" ✓
+  - Callsign at START or END of transmission — both are correct.
+If the callsign sounds like it matches the aircraft's callsign in ANY way, do NOT flag it.
+
+--- PLACE NAME PHONETIC FLEXIBILITY ---
+Nameplaces heard over radio are frequently corrupted. Accept ANY phonetically similar pronunciation:
+  - "Hetto" or "Hutto" or "Hooto" all mean Hutto, TX. DO NOT flag.
+  - "Buda" / "Byooda" — same place. DO NOT flag.
+  - "Bergstrom" / "Bergstrum" — same. DO NOT flag.
+General rule: if the spoken version sounds like the correct place name, accept it as correct.
+
+--- NUMBER / LEVEL FLEXIBILITY ---
+- "Flight Level 250" = "FL250" = "Two Five Zero" = "250" — all identical.
+- "Eight thousand" = "8,000 feet" = "8000".
+- Digits grouped differently are fine: "one two three" = "123".
+
+--- DO NOT PENALISE ---
+- Extra confirmatory phrases ("Wilco", "Roger", "Affirmative").
+- Pilot asking a question AFTER the readback (e.g. "...N1234A, any PIREPs?").
+- Emergency reports, PIREP information, or company position reports.
+- Different but acceptable word order.
+- Airline code vs. full name ("AAL" = "American").
+
+--- SCORING ---
+Start at 100. Deduct points ONLY for missing mandatory readback items:
+- Missing callsign: −20
+- Each missing altitude/FL: −20
+- Each missing heading: −15
+- Each missing runway: −15
+- Each missing squawk: −20
+- Each missing frequency: −15
+Minimum score: 0. Never penalise for style.
+
+--- OUTPUT RULES ---
+- If isCorrect is true OR score >= 90: set errors = [] and feedback = ""
+- Only populate errors[] and feedback when there are REAL factual omissions/errors.
+- correctReadback: provide the shortest standard ICAO exemplar readback.
+- feedback: one sentence max, only if score < 90, describing the specific omission.`;
 
 export async function getATCResponse(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
@@ -138,22 +283,25 @@ export async function getATCResponse(
   return { atcText: content.trim(), expectedReadback: '' };
 }
 
-const CHAIN_SYSTEM_PROMPT = `You are the ATC controller managing a single aircraft from pre-departure to parking at the destination.
-Generate the NEXT logical ATC radio transmission based on the current flight phase and conversation history.
+const CHAIN_SYSTEM_PROMPT = `You are the ATC controller. 
+
+STRICT CONCISENESS & ICAO RULES:
+- BE EXTREMELY CONCISE. Eliminate all conversational filler (e.g., avoid "I show you at...", "I see you...", "Roger that").
+- No greeting/closing unless essential.
+- FORMAT: "[Instruction], [Callsign]" or "[Callsign], [Instruction]".
+- EXAMPLE: Instead of "Air India 171, descend and maintain...", say "AI171, descend and maintain FL250."
+- NEGATIONS: If something is unavailable, say "FL250 unavailable, maintain FL280, AI171."
+- SAFETY: Be calm and brief. Direct actions only.
 
 Output ONLY valid JSON:
 {
   "flight_phase": "taxi|departure|climb|cruise|descend|approach|arrival|taxi_in|parked_gate",
-  "atc_transmission": "The exact radio call you are making to the pilot",
-  "expected_readback": "The exact readback expected from the pilot",
-  "key_readback_items": ["item1", "item2"],
-  "coaching_notes": "One brief tip for the user",
-  "session_complete": false // set to true ONLY when parked at the gate at the end of the flight
-}
-
-* Keep your radio calls highly realistic, concise, and in standard ICAO phraseology.
-* If the user just completed a readback perfectly, acknowledge and issue the next logical clearance.
-* If the user made a mistake in the previous readback, correct them before issuing the next clearance.`;
+  "atc_transmission": "Concise radio call (e.g. 'N1234A, taxi to runway 36R')",
+  "expected_readback": "The exact readback expected",
+  "key_readback_items": ["item1"],
+  "coaching_notes": "One brief tip",
+  "session_complete": false 
+}`;
 
 export async function generateNextExchange(
   airportContext: string,
@@ -256,12 +404,21 @@ Pilot's actual readback: ${pilotReadback}`,
     const data = await response.json();
     const parsed = JSON.parse(data.choices?.[0]?.message?.content || '{}');
 
+    // Sanitise: strip phantom errors with empty given/expected/item (model hallucinations)
+    const rawErrors: ReadbackError[] = parsed.errors || [];
+    const cleanErrors = rawErrors.filter(
+      (e) => e && (e.given?.trim() || e.expected?.trim() || e.item?.trim())
+    );
+
+    const score = Math.min(100, Math.max(0, Number(parsed.score) || 0));
+    const isCorrect = cleanErrors.length === 0 && score >= 80;
+
     return {
-      isCorrect: Boolean(parsed.isCorrect),
-      errors: parsed.errors || [],
+      isCorrect,
+      errors: cleanErrors,
       correctReadback: parsed.correctReadback || expectedReadback,
-      score: Math.min(100, Math.max(0, Number(parsed.score) || 0)),
-      feedback: parsed.feedback || '',
+      score: isCorrect ? Math.max(score, 100) : score,
+      feedback: isCorrect ? '' : (parsed.feedback || ''),
     };
   } catch (e) {
     return { isCorrect: false, errors: [], correctReadback: expectedReadback, score: 0, feedback: 'Validation unavailable.' };

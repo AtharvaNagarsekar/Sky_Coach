@@ -45,11 +45,23 @@ export async function transcribeAudio(
   audioBlob: Blob,
   _airportContext: string = '',
   _priorLines: string[] = [],
-  isSimulator: boolean = false
+  isSimulator: boolean = false,
+  callsign: string = ''
 ): Promise<TranscriptionResult> {
+  // Build a rich Whisper prompt that includes the exact callsign so the model
+  // biases toward recognising it correctly (e.g. "6E431" or "November 1234 Alpha")
+  const callsignHint = callsign ? `${callsign}, ` : '';
+
   const whisperPrompt = isSimulator
-    ? 'Air India, Singapore, Southwest, United, pilot, readback, niner, tree, fife, roger, wilco'
-    : 'ATC, live, radio, aviation, phraseology, niner, tree, fife, roger, wilco, affirm, negative, squawk, alpha, bravo, charlie, runway, flight, landing, takeoff, contact, maintaining, climb, decend, traffic';
+    ? `${callsignHint}ATC, pilot readback, niner, tree, fife, roger, wilco, affirm, negative, \
+squawk, runway, heading, altitude, frequency, flight level, maintain, climb, descend, \
+hold short, line up and wait, cleared for takeoff, cleared to land, contact, \
+TCAS RA, TCAS advisory, traffic alert, ATIS, SID, STAR, ILS, VOR, DME, NDB, \
+hold, outbound, inbound, radial, intersection, fix, waypoint, \
+Alpha, Bravo, Charlie, Delta, Echo, Foxtrot, Golf, Hotel, India, Juliett, \
+Kilo, Lima, Mike, November, Oscar, Papa, Quebec, Romeo, Sierra, Tango, \
+Uniform, Victor, Whiskey, Xray, Yankee, Zulu`
+    : 'ATC, live, radio, aviation, phraseology, niner, tree, fife, roger, wilco, affirm, negative, squawk, alpha, bravo, charlie, runway, flight, landing, takeoff, contact, maintaining, climb, descend, traffic';
 
   const formData = new FormData();
   formData.append('file', audioBlob, 'audio.webm');
@@ -148,22 +160,22 @@ export async function transcribeForSimulator(
   expectedReadback: string = '',
   callsign: string = ''
 ): Promise<{ rawText: string; correctedText: string }> {
-  const result = await transcribeAudio(audioBlob, '', [], true);
+  const result = await transcribeAudio(audioBlob, '', [], true, callsign);
   const rawText: string = result.text.trim();
 
   if (!rawText || result.confidence < 0.2) {
     return { rawText: '', correctedText: '' };
   }
 
-  // Step 2: Mistral context-aware correction (same as Python's Mistral call)
+  // Step 2: LLM context-aware correction — ALWAYS runs.
+  // Even with no expectedReadback, the model uses the callsign + aviation vocabulary
+  // to fix STT errors (e.g. "6 echo 4 3 1" → "6E431", "tea class" → "TCAS RA").
   let correctedText = rawText;
-  if (expectedReadback) {
-    try {
-      const corrected = await correctSimulatorReadback(rawText, expectedReadback, callsign);
-      if (corrected) correctedText = corrected;
-    } catch {
-      correctedText = rawText; // Fall back to raw on error
-    }
+  try {
+    const corrected = await correctSimulatorReadback(rawText, expectedReadback, callsign);
+    if (corrected) correctedText = corrected;
+  } catch {
+    correctedText = rawText; // Fall back to raw on error
   }
 
   return { rawText, correctedText };
@@ -279,20 +291,84 @@ export async function correctSimulatorReadback(
   expectedReadback: string,
   callsign: string
 ): Promise<string> {
-  if (!rawText.trim() || !expectedReadback) return rawText;
+  if (!rawText.trim() || !callsign) return rawText;
 
-  const prompt = `You are an expert aviation communications STT correction AI.
-USER CALLSIGN: "${callsign}"
-EXPECTED PHRASE: "${expectedReadback}"
-RAW WHISPER STT: "${rawText}"
+  // Build optional expected-readback context — if available it helps the model
+  // identify what items should be present; if not, we rely on callsign + aviation vocab.
+  const expectedContext = expectedReadback
+    ? `EXPECTED READBACK (for context only — do NOT auto-insert missing items): "${expectedReadback}"`
+    : `NO EXPECTED READBACK PROVIDED — use callsign and aviation knowledge only.`;
+
+  // Expand the callsign into both compressed and phonetic forms so the model
+  // can recognise any Whisper mishearing of it (e.g. "6E431" → "6E four three one",
+  // or "November 1234 Alpha" for N1234A).
+  const csExpanded = callsign
+    .toUpperCase()
+    .split('')
+    .map(c => {
+      const phonetic: Record<string,string> = {
+        A:'Alpha',B:'Bravo',C:'Charlie',D:'Delta',E:'Echo',F:'Foxtrot',
+        G:'Golf',H:'Hotel',I:'India',J:'Juliett',K:'Kilo',L:'Lima',
+        M:'Mike',N:'November',O:'Oscar',P:'Papa',Q:'Quebec',R:'Romeo',
+        S:'Sierra',T:'Tango',U:'Uniform',V:'Victor',W:'Whiskey',
+        X:'X-ray',Y:'Yankee',Z:'Zulu'
+      };
+      return phonetic[c] ?? c;
+    })
+    .join(' ');
+
+  const prompt = `You are an expert aviation radio communications STT correction AI.
+AIRCRAFT CALLSIGN: "${callsign}" (phonetic: ${csExpanded})
+${expectedContext}
+RAW WHISPER OUTPUT: "${rawText}"
 
 STRICT CORRECTION RULES:
-1. CALLSIGN PRIORITY: Fix phonetic mishearings of the callsign "${callsign}" (e.g., "I am in the" -> "Air India", "Sail" -> "Singapore").
-2. NATO PHONETICS: Ensure NATO alphabet is used correctly (Alpha, Bravo, Charlie, Delta, Echo, Foxtrot, Golf, Hotel, India, Juliett, Kilo, Lima, Mike, November, Oscar, Papa, Quebec, Romeo, Sierra, Tango, Uniform, Victor, Whiskey, X-ray, Yankee, Zulu). Fix mishearings like "brave" to "Bravo" or "echoes" to "Echo".
-3. AVIATION PHRASEOLOGY: Standardize phrases like "Roger", "Wilco", "Affirm", "Negative", "Line up and wait", "Cleared for takeoff", "Hold short", "Traffic in sight".
-4. NUMBER FORMATTING: Use "niner" for 9, "tree" for 3, "fife" for 5. Formats: altitudes (e.g., "three thousand"), headings (e.g., "heading zero niner zero"), runways (e.g., "runway two seven left").
-5. PRESERVE INTENT: If the pilot says the wrong runway or altitude intentionally, keep the error, but fix the phonetics (e.g., if they said "runway two six" when expected was "two seven", keep "runway two six").
-6. OUTPUT: provide ONLY the corrected transcript. No conversation or labels.`;
+1. CALLSIGN RECOGNITION: The aircraft callsign is "${callsign}". Whisper may have misheard it in
+   many ways. Fix any phonetically similar mishearing back to "${callsign}".
+   Examples of valid transcriptions of "${callsign}": ${csExpanded}, any digit-by-digit reading.
+   Do NOT change the callsign to something else — just fix the spelling/spacing.
+
+2. NATO PHONETIC ALPHABET (fix mishearings):
+   Alpha=A, Bravo=B, Charlie=C, Delta=D, Echo=E, Foxtrot=F, Golf=G, Hotel=H,
+   India=I, Juliett=J, Kilo=K, Lima=L, Mike=M, November=N, Oscar=O, Papa=P,
+   Quebec=Q, Romeo=R, Sierra=S, Tango=T, Uniform=U, Victor=V, Whiskey=W,
+   X-ray=X, Yankee=Y, Zulu=Z.
+   Fix: "brave"→"Bravo", "echoes"→"Echo", "novel"→"November", "in the"→"India".
+
+3. AVIATION PHRASEOLOGY (standardise STT mishearings):
+   - "Roger", "Wilco", "Affirm", "Negative", "Unable"
+   - "Cleared for takeoff", "Cleared to land", "Cleared ILS approach"
+   - "Line up and wait" (NOT "lineup and wait" or "lined up wait")
+   - "Hold short", "Hold position"
+   - "Contact [facility] on [freq]", "Radar contact", "Radar service terminated"
+   - "Maintain [altitude]", "Climb and maintain", "Descend and maintain"
+   - "Fly heading [xxx]", "Turn left/right heading"
+   - "Squawk [code]", "Squawk ident", "Stop squawk"
+   - "Traffic in sight", "Negative traffic"
+
+4. AVIATION SYSTEMS / ACRONYMS (fix Whisper mistranscriptions):
+   - TCAS RA (Traffic Collision Avoidance System Resolution Advisory)
+     → Whisper may say "tee cas" "t-cass" "tea class" — fix to "TCAS RA"
+   - ATIS (Automatic Terminal Information Service)
+   - SID (Standard Instrument Departure), STAR (Standard Terminal Arrival Route)
+   - ILS (Instrument Landing System), VOR, DME, NDB, GPS, RNAV, RNP
+   - QNH, QFE, altimeter setting
+   - FIR (Flight Information Region), TMA (Terminal Manoeuvring Area)
+   - PIREP (Pilot Report), SIGMET, METAR, TAF
+   - FL (Flight Level) — "FL250" not "flight level to fifty"
+
+5. NUMBER PRONUNCIATION:
+   - Individual digits for callsigns & squawk codes: "6E431" → "6 Echo 4 3 1"
+   - Altitudes: "8,000" → "eight thousand", FL250 → "flight level two five zero"
+   - Headings: 270 → "two seven zero"
+   - Frequencies: 119.4 → "one one niner decimal four"
+   - Use "niner" for 9, "tree" for 3, "fife" for 5 where spoken that way.
+
+6. PRESERVE ERRORS INTENTIONALLY MADE:
+   If the pilot said the wrong number/runway (e.g., "runway two six" vs expected "two seven"),
+   KEEP their error — only fix the transcription quality, not the content.
+
+7. OUTPUT: corrected text ONLY — no labels, no explanation, no quotes.`;
 
   try {
     const response = await fetch(GROQ_CHAT_URL, {

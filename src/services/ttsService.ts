@@ -10,21 +10,14 @@ function expandAviationText(text: string): string {
     .replace(/\b(\d{3})\.(\d{1,2})\b/g, (_, a, b) =>
       a.split('').map(toNato).join(' ') + ' point ' + b.split('').map(toNato).join(' '))
     // Altitudes 5000 through 99000
-    .replace(/\b(\d{4,5})\b/g, (match) => {
-      const num = parseInt(match, 10);
-      if (num >= 1000 && num <= 99000 && num % 100 === 0) {
-        return numberToWords(num);
-      }
-      return match;
-    })
-    // Headings 3-digit
-    .replace(/heading\s+(\d{3})/gi, (_, h) => `heading ${h.split('').map(toNato).join(' ')}`)
-    // Squawk codes
-    .replace(/squawk\s+(\d{4})/gi, (_, c) => `squawk ${c.split('').map(toNato).join(' ')}`)
-    // Runway 18L/36R etc
-    .replace(/runway\s+(\d{1,2})([LRC]?)/gi, (_, n, s) => `runway ${n.split('').join(' ')} ${s}`.trim())
-    // NATO phonetics for standalone letters
-    .replace(/\b([A-Z])\b/g, (_, l) => toNato(l));
+    // Prevent "I" (as in "I have") from becoming "India"
+    .replace(/\bI\b/g, 'I')
+    // NATO phonetics for standalone letters (except I)
+    .replace(/\b([A-H|J-Z])\b/g, (_, l) => toNato(l))
+    // Expand specific altitudes like 5000 -> "five thousand"
+    .replace(/\b(\d000)\b/g, (match) => numberToWords(parseInt(match, 10)))
+    // Everything else numeric -> split digits (e.g. 1234 -> "one two three four")
+    .replace(/\d/g, (d) => toNato(d) + ' ');
 }
 
 function toNato(c: string): string {

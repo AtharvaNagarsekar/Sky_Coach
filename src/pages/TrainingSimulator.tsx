@@ -17,7 +17,6 @@ function SetupScreen({ onStart }: { onStart: (situation: string, callsign: strin
   const [situation, setSituation] = useState('taxi_out');
   const [callsign, setCallsign] = useState('N1234A');
   const [custom, setCustom] = useState('');
-  const [isChain, setIsChain] = useState(false);
 
   // Group situations
   const groups: Record<string, string[]> = {};
@@ -80,8 +79,8 @@ function SetupScreen({ onStart }: { onStart: (situation: string, callsign: strin
                 className="input-field"
                 value={custom}
                 onChange={e => setCustom(e.target.value)}
-                placeholder="Describe specific scenario, e.g. 'VFR flight to KSAT, requesting flight following'"
-                style={{ minHeight: 80, resize: 'vertical', lineHeight: 1.5 }}
+                placeholder="Type your scenario here... e.g. 'Requesting engine start at General Aviation ramp' or 'Declaring low fuel emergency'"
+                style={{ minHeight: 120, resize: 'vertical', lineHeight: 1.5, fontSize: '0.9rem', border: '1px solid var(--cyan-primary)' }}
               />
             </div>
           )}
@@ -95,24 +94,14 @@ function SetupScreen({ onStart }: { onStart: (situation: string, callsign: strin
                   ? 'ATC will speak first in this scenario.'
                   : 'You (pilot) speak first in this scenario.')
                 : 'You (pilot) speak first.'}
+              {situation === 'complete_flight' && ' (Progressive Mode Active)'}
             </span>
-          </div>
-
-          {/* Mode Toggle */}
-          <div className="glass-panel" style={{ padding: 16, background: 'rgba(20,30,40,0.4)' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer' }}>
-              <input type="checkbox" checked={isChain} onChange={e => setIsChain(e.target.checked)} style={{ width: 18, height: 18, accentColor: 'var(--cyan-primary)' }} />
-              <div>
-                <div style={{ fontWeight: 600, color: isChain ? 'var(--cyan-primary)' : 'var(--text-primary)' }}>🔗 Chain Session (Full Flight)</div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Continuous conversation from taxi to parking</div>
-              </div>
-            </label>
           </div>
 
           <button
             className="btn btn-primary btn-lg"
             style={{ width: '100%', justifyContent: 'center' }}
-            onClick={() => onStart(situation, callsign || 'N1234A', custom, isChain)}
+            onClick={() => onStart(situation, callsign || 'N1234A', custom, situation === 'complete_flight')}
             disabled={situation === 'custom' && !custom.trim()}
           >
             ▶ Start Training Session
@@ -126,9 +115,11 @@ function SetupScreen({ onStart }: { onStart: (situation: string, callsign: strin
 // ─── Readback Validator Panel ──────────────────────────────────────────────────
 function ValidationPanel({ validation }: { validation: ReadbackValidation; expected?: string }) {
   const scoreColor = validation.score >= 80 ? 'var(--green)' : validation.score >= 50 ? 'var(--yellow)' : 'var(--red)';
+  const hasErrors = validation.errors.length > 0;
+
   return (
     <div style={{ marginTop: 10, padding: '14px 16px', background: 'rgba(5,10,20,0.7)', border: `1px solid ${scoreColor}40`, borderRadius: 10 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: hasErrors ? 10 : 8 }}>
         <span style={{ fontSize: '1.1rem' }}>{validation.isCorrect ? '✅' : '❌'}</span>
         <span style={{ fontFamily: 'Rajdhani', fontWeight: 600, color: scoreColor }}>
           Readback Score: {validation.score}/100
@@ -136,7 +127,8 @@ function ValidationPanel({ validation }: { validation: ReadbackValidation; expec
         {validation.isCorrect && <span className="badge badge-green">CORRECT</span>}
       </div>
 
-      {validation.errors.length > 0 && (
+      {/* Error details — only shown when there are real errors */}
+      {hasErrors && (
         <div style={{ marginBottom: 10 }}>
           {validation.errors.map((err, i) => (
             <div key={i} style={{ marginBottom: 6, padding: '6px 10px', background: 'rgba(255,68,68,0.08)', border: '1px solid rgba(255,68,68,0.2)', borderRadius: 6 }}>
@@ -152,13 +144,24 @@ function ValidationPanel({ validation }: { validation: ReadbackValidation; expec
         </div>
       )}
 
-      <div style={{ padding: '8px 12px', background: 'rgba(57,255,20,0.06)', border: '1px solid rgba(57,255,20,0.2)', borderRadius: 6, marginBottom: 8 }}>
-        <div style={{ fontSize: '0.7rem', color: 'var(--green)', marginBottom: 3, textTransform: 'uppercase', letterSpacing: '0.06em' }}>✓ Correct Readback</div>
-        <div style={{ fontFamily: 'Share Tech Mono', fontSize: '0.82rem', color: 'var(--text-primary)', lineHeight: 1.5 }}>{validation.correctReadback}</div>
-      </div>
-
-      {validation.feedback && (
-        <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontStyle: 'italic' }}>💬 {validation.feedback}</div>
+      {/* On correct readback: just a clean green confirmation, no exemplar */}
+      {validation.isCorrect ? (
+        <div style={{ padding: '8px 12px', background: 'rgba(57,255,20,0.08)', border: '1px solid rgba(57,255,20,0.3)', borderRadius: 6 }}>
+          <div style={{ fontSize: '0.75rem', color: 'var(--green)', fontWeight: 600 }}>
+            ✅ Readback complete — all items acknowledged correctly.
+          </div>
+        </div>
+      ) : (
+        /* On incorrect readback: show the instructor exemplar + feedback */
+        <>
+          <div style={{ padding: '8px 12px', background: 'rgba(57,255,20,0.06)', border: '1px solid rgba(57,255,20,0.2)', borderRadius: 6, marginBottom: 8 }}>
+            <div style={{ fontSize: '0.7rem', color: 'var(--green)', marginBottom: 3, textTransform: 'uppercase', letterSpacing: '0.06em' }}>✓ Standard Readback</div>
+            <div style={{ fontFamily: 'Share Tech Mono', fontSize: '0.82rem', color: 'var(--text-primary)', lineHeight: 1.5 }}>{validation.correctReadback}</div>
+          </div>
+          {validation.feedback && (
+            <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontStyle: 'italic' }}>💬 {validation.feedback}</div>
+          )}
+        </>
       )}
     </div>
   );
@@ -256,6 +259,7 @@ export default function TrainingSimulator() {
   const [fallbackText, setFallbackText] = useState('');
   const [rawTranscription, setRawTranscription] = useState('');
   const [processingStatus, setProcessingStatus] = useState<string>('');
+  const [selectedMsgId, setSelectedMsgId] = useState<string | null>(null);
 
   const chatRef = useRef<HTMLDivElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -270,19 +274,46 @@ export default function TrainingSimulator() {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages]);
 
-  const appendMessage = (msg: ConversationMessage) => setMessages(prev => [...prev, msg]);
+  const appendMessage = (msg: ConversationMessage) => {
+    setMessages(prev => {
+      const next = [...prev, msg];
+      if (msg.role === 'pilot' && msg.validation) {
+        setSelectedMsgId(msg.id);
+      }
+      return next;
+    });
+  };
 
   const addATCMessage = useCallback(async (history: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>) => {
     setIsATCTalking(true);
     setError(null);
     try {
       const { atcText, expectedReadback } = await getATCResponse(history);
+      const deChatter = (t: string) => t
+        .replace(/^(Here is|This is|I have|Sure|Certainly|Understood|Rogered)[^:\n.]*[:\.]\s*/i, '')
+        .replace(/^[^\n]*training scenario[:\.]\s*/i, '')
+        .replace(/\[SESSION_COMPLETE\]/g, '')
+        .trim();
+
+      const isComplete = atcText.includes('[SESSION_COMPLETE]');
+      const cleanAtcText = deChatter(atcText);
+
       setCurrentExpected(expectedReadback);
-      const msg: ConversationMessage = { id: uuid(), role: 'atc', text: atcText, timestamp: new Date() };
+      const msg: ConversationMessage = { id: uuid(), role: 'atc', text: cleanAtcText, timestamp: new Date() };
       appendMessage(msg);
-      setSessionHistory(prev => [...prev, { role: 'assistant', content: atcText }]);
+      setSessionHistory(prev => [...prev, { role: 'assistant', content: cleanAtcText }]);
+      
       // TTS
-      speakATC(atcText, () => setIsATCTalking(false));
+      speakATC(cleanAtcText, () => {
+        setIsATCTalking(false);
+        if (isComplete) {
+          // Pass the latest messages to avoid stale closure
+          setMessages(currentMsgs => {
+            setTimeout(() => handleEndSession(currentMsgs), 1500);
+            return currentMsgs;
+          });
+        }
+      });
     } catch (e) {
       setError('Failed to get ATC response. Check your connection.');
       setIsATCTalking(false);
@@ -301,7 +332,18 @@ export default function TrainingSimulator() {
     setScenarioTraffic(chosenTraffic);
 
     const sysCtx = buildSessionContext(sit as any, cs, customTopic);
-    const sysMsg = { role: 'system' as const, content: `${sysCtx}\n\nYou are the ATC controller. Provide realistic ATC radio communications for this training scenario. Include EXPECTED_READBACK after each transmission.` };
+    const sysMsg = { 
+      role: 'system' as const, 
+      content: `${sysCtx}
+      
+STRICT CONCISENESS & ICAO RULES:
+1. BE EXTREMELY CONCISE. Eliminate all conversational filler (e.g., avoid "I show you at...", "I see you...").
+2. No unnecessary pleasantries. Jump immediately to the radio call.
+3. FORMAT: "[Instruction], [Callsign]" or "[Callsign], [Instruction]".
+4. If something is unavailable: "[Item] unavailable, [New Instruction], [Callsign]".
+5. ${!chain ? "STATIC DRILL: Once the pilot correctly reads back the instruction, acknowledge and append '[SESSION_COMPLETE]'." : ""}
+6. Include EXPECTED_READBACK: after your radio call.` 
+    };
     const history = [sysMsg];
     setSessionHistory(history);
     setPhase('session');
@@ -479,7 +521,13 @@ export default function TrainingSimulator() {
             if (resp.session_complete) {
               const msg: ConversationMessage = { id: uuid(), role: 'atc', text: '⛳ SESSION COMPLETE — Aircraft at gate. Well done!', timestamp: new Date() };
               appendMessage(msg);
-              speakATC(msg.text, () => { setIsATCTalking(false); handleEndSession(); });
+              speakATC(msg.text, () => { 
+                setIsATCTalking(false); 
+                setMessages(currentMsgs => {
+                  setTimeout(() => handleEndSession(currentMsgs), 2000);
+                  return currentMsgs;
+                });
+              });
             } else {
               const msg: ConversationMessage = { id: uuid(), role: 'atc', text: resp.atc_transmission, timestamp: new Date() };
               appendMessage(msg);
@@ -505,9 +553,9 @@ export default function TrainingSimulator() {
     }
   };
 
-  const handleEndSession = () => {
+  const handleEndSession = (finalMessages?: ConversationMessage[]) => {
     cancelTTS();
-    const s = aggregateStats(messages);
+    const s = aggregateStats(finalMessages || messages);
     setStats(s);
     setPhase('debrief');
   };
@@ -571,7 +619,7 @@ export default function TrainingSimulator() {
         statusLabel={isATCTalking ? 'ATC TRANSMITTING' : isRecording ? 'PILOT TRANSMITTING' : isProcessing ? 'PROCESSING' : 'STANDBY'}
         statusActive={isATCTalking || isRecording}
       >
-        <button className="btn btn-ghost btn-sm" onClick={handleEndSession}>End Session</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => handleEndSession(messages)}>End Session</button>
       </Header>
 
       <div style={{ flex: 1, overflow: 'hidden', display: 'grid', gridTemplateColumns: '1fr 300px', gap: 0, padding: '20px 0 0', minHeight: 0 }}>
@@ -590,7 +638,12 @@ export default function TrainingSimulator() {
                 );
               }
               return (
-                <div key={msg.id} className={`chat-bubble-wrap ${msg.role} fade-in`}>
+                <div 
+                  key={msg.id} 
+                  className={`chat-bubble-wrap ${msg.role} fade-in ${selectedMsgId === msg.id ? 'active' : ''}`}
+                  onClick={() => msg.validation && setSelectedMsgId(msg.id)}
+                  style={{ cursor: msg.validation ? 'pointer' : 'default' }}
+                >
                   <div className="chat-meta">
                     {msg.role === 'atc' ? '🎙 ATC · KAUS' : `✈️ ${callsign}`} · {msg.timestamp.toLocaleTimeString()}
                     {msg.validation && (
@@ -601,7 +654,6 @@ export default function TrainingSimulator() {
                   </div>
                   <div className={`chat-bubble ${msg.role}`}>
                     <div style={{ fontFamily: 'Share Tech Mono', fontSize: '0.84rem', lineHeight: 1.6 }}>{msg.text}</div>
-                    {msg.validation && <ValidationPanel validation={msg.validation} expected={''} />}
                   </div>
                 </div>
               );
@@ -684,6 +736,21 @@ export default function TrainingSimulator() {
 
         {/* Right sidebar */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, overflow: 'auto', paddingBottom: 4 }}>
+          {/* Clearance Validation Panel */}
+          {selectedMsgId && messages.find(m => m.id === selectedMsgId)?.validation && (
+            <div className="glass-panel" style={{ padding: '16px', borderLeft: '3px solid var(--cyan-primary)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <div style={{ fontSize: '0.72rem', color: 'var(--cyan-primary)', textTransform: 'uppercase', letterSpacing: '0.1em', fontFamily: 'Share Tech Mono' }}>
+                  📡 CLEARANCE ANALYSIS
+                </div>
+                <button onClick={() => setSelectedMsgId(null)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.7rem' }}>✕ CLOSE</button>
+              </div>
+              <ValidationPanel 
+                validation={messages.find(m => m.id === selectedMsgId)!.validation!} 
+              />
+            </div>
+          )}
+
           {/* ATIS / Context */}
           <div className="glass-panel" style={{ padding: '16px' }}>
             <div style={{ fontSize: '0.72rem', color: 'var(--cyan-primary)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 10, fontFamily: 'Share Tech Mono' }}>
