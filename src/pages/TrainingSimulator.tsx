@@ -757,12 +757,12 @@ STRICT CONCISENESS & ICAO RULES:
               📻 ATIS — INFO NOVEMBER
             </div>
             {[
-              ['Airport', 'KAUS · Austin–Bergstrom'],
-              ['Runways', '18L/36R active'],
-              ['Wind', '180° @ 8kts'],
-              ['Vis', '10SM · Few @ 4,000'],
-              ['Altimeter', '29.92 in Hg'],
-              ['Temp/DP', '22°C / 15°C'],
+              ['Airport', `${currentAirport?.icao} · ${currentAirport?.name}`],
+              ['Runways', currentAirport?.runways || 'Unk active'],
+              ['Wind', currentAirport?.weather?.wind || '000° @ 0kts'],
+              ['Vis', currentAirport?.weather?.vis || '10SM'],
+              ['Altimeter', currentAirport?.weather?.alt || '29.92'],
+              ['Temp/DP', `${currentAirport?.weather?.temp || '15°C'} / 10°C`],
             ].map(([k, v]) => (
               <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid rgba(255,255,255,0.04)', fontSize: '0.75rem' }}>
                 <span style={{ color: 'var(--text-muted)' }}>{k}</span>
@@ -775,12 +775,12 @@ STRICT CONCISENESS & ICAO RULES:
           <div className="glass-panel" style={{ padding: '16px' }}>
             <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>Frequencies</div>
             {[
-              ['ATIS', '128.625'],
+              ['ATIS', currentAirport?.frequencies?.atis || '128.0'],
               ['Clearance', '135.475'],
-              ['Ground', '121.9'],
-              ['Tower', '119.0'],
+              ['Ground', currentAirport?.frequencies?.gnd || '121.9'],
+              ['Tower', currentAirport?.frequencies?.twr || '119.0'],
               ['Departure', '124.0'],
-              ['Approach', '119.4'],
+              ['Approach', currentAirport?.frequencies?.app || '119.4'],
             ].map(([f, freq]) => (
               <div key={f} style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', fontSize: '0.75rem', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
                 <span style={{ color: 'var(--text-secondary)' }}>{f}</span>

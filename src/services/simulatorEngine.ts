@@ -470,14 +470,46 @@ export function aggregateStats(messages: ConversationMessage[]): SessionStats {
 // ─── Airport Variety ──────────────────────────────────────────────────────────
 
 export const AIRPORTS = [
-  { icao: 'KAUS', name: 'Austin–Bergstrom', location: 'Austin, TX', runways: '18L/36R, 18R/36L' },
-  { icao: 'WSSS', name: 'Singapore Changi', location: 'Singapore', runways: '02L/20R, 02C/20C, 02R/20L' },
-  { icao: 'EGLL', name: 'London Heathrow', location: 'London, UK', runways: '09L/27R, 09R/27L' },
-  { icao: 'KLAX', name: 'Los Angeles Intl', location: 'Los Angeles, CA', runways: '06L/24R, 06R/24L, 07L/25R, 07R/25L' },
-  { icao: 'OMDB', name: 'Dubai International', location: 'Dubai, UAE', runways: '12L/30R, 12R/30L' },
-  { icao: 'RJTT', name: 'Tokyo Haneda', location: 'Tokyo, Japan', runways: '16L/34R, 16R/34L, 04/22, 05/23' },
-  { icao: 'YSSY', name: 'Sydney Kingsford Smith', location: 'Sydney, Australia', runways: '16L/34R, 16R/34L, 07/25' },
-  { icao: 'EHAM', name: 'Amsterdam Schiphol', location: 'Amsterdam, Netherlands', runways: '06/24, 09/27, 18L/36R, 18C/36C, 18R/36L' }
+  { 
+    icao: 'KAUS', name: 'Austin–Bergstrom', location: 'Austin, TX', 
+    runways: '18L/36R active', frequencies: { atis: '124.4', gnd: '121.9', twr: '119.0', app: '119.4' },
+    weather: { wind: '180° @ 8kts', vis: '10SM · Few @ 4,000', alt: '29.92', temp: '22°C' }
+  },
+  { 
+    icao: 'WSSS', name: 'Singapore Changi', location: 'Singapore', 
+    runways: '02L/20R active', frequencies: { atis: '128.6', gnd: '121.7', twr: '118.6', app: '119.3' },
+    weather: { wind: '010° @ 12kts', vis: '8000m · SCT @ 1,800', alt: '1008 hPa', temp: '31°C' }
+  },
+  { 
+    icao: 'EGLL', name: 'London Heathrow', location: 'London, UK', 
+    runways: '27R/09L active', frequencies: { atis: '128.07', gnd: '121.9', twr: '118.5', app: '120.4' },
+    weather: { wind: '260° @ 15G25kts', vis: '6000m · BKN @ 2,500', alt: '1013 hPa', temp: '14°C' }
+  },
+  { 
+    icao: 'KLAX', name: 'Los Angeles Intl', location: 'Los Angeles, CA', 
+    runways: '24L/R, 25L/R active', frequencies: { atis: '133.8', gnd: '121.65', twr: '119.8', app: '124.3' },
+    weather: { wind: '250° @ 10kts', vis: '10SM · SKC', alt: '29.95', temp: '19°C' }
+  },
+  { 
+    icao: 'OMDB', name: 'Dubai International', location: 'Dubai, UAE', 
+    runways: '12L/30R active', frequencies: { atis: '131.7', gnd: '118.35', twr: '118.75', app: '124.9' },
+    weather: { wind: '330° @ 14kts', vis: '9000m · NSC', alt: '1006 hPa', temp: '38°C' }
+  },
+  { 
+    icao: 'RJTT', name: 'Tokyo Haneda', location: 'Tokyo, Japan', 
+    runways: '34L/R active', frequencies: { atis: '128.8', gnd: '118.22', twr: '118.1', app: '119.1' },
+    weather: { wind: '160° @ 9kts', vis: '10km+ · SCT @ 3,000', alt: '1015 hPa', temp: '25°C' }
+  },
+  { 
+    icao: 'YSSY', name: 'Sydney Kingsford Smith', location: 'Sydney, Australia', 
+    runways: '16L/34R active', frequencies: { atis: '126.25', gnd: '121.7', twr: '120.5', app: '124.4' },
+    weather: { wind: '190° @ 18kts', vis: '10km+ · BKN @ 4,500', alt: '1011 hPa', temp: '18°C' }
+  },
+  { 
+    icao: 'EHAM', name: 'Amsterdam Schiphol', location: 'Amsterdam, Netherlands', 
+    runways: '18L/36C active', frequencies: { atis: '132.97', gnd: '121.7', twr: '119.22', app: '118.4' },
+    weather: { wind: '210° @ 10kts', vis: '5000m · BR · OVC @ 800', alt: '1010 hPa', temp: '11°C' }
+  }
 ];
 
 export function getRandomAirport() {

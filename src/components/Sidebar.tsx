@@ -3,17 +3,6 @@ import { NavLink } from 'react-router-dom';
 
 const NAV_ITEMS = [
   {
-    to: '/live-stream',
-    icon: (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-        <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
-      </svg>
-    ),
-    label: 'Live Stream',
-    sublabel: 'Audio Only',
-  },
-  {
     to: '/live-atc',
     icon: (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -143,14 +132,7 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      {/* Bottom info */}
-      <div style={{ padding: '16px 20px', borderTop: '1px solid var(--border)', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-        <div style={{ marginBottom: 2 }}>KAUS · Austin–Bergstrom Intl</div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <div className="status-dot live" />
-          <span style={{ color: 'var(--green)' }}>APP / DEP Frequency</span>
-        </div>
-      </div>
+      {/* Bottom info hidden as per request */}
     </aside>
   );
 }
