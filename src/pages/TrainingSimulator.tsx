@@ -507,7 +507,7 @@ STRICT CONCISENESS & ICAO RULES:
         setChainHistory(newHistory);
 
         if (validation) {
-          const currentWeakness = validation.errors[0]?.category || 'None';
+          const currentWeakness = (validation.errors[0]?.category as string) || 'None';
           const lastWeakness = localStorage.getItem('skycoach_last_weakness') || 'None';
           updateQValue({ weakestCategory: lastWeakness }, scenarioTraffic, validation.score / 100, { weakestCategory: currentWeakness });
           if (currentWeakness && currentWeakness !== 'None') {
