@@ -293,6 +293,9 @@ export default function TrainingSimulator() {
         .replace(/^(Here is|This is|I have|Sure|Certainly|Understood|Rogered)[^:\n.]*[:\.]\s*/i, '')
         .replace(/^[^\n]*training scenario[:\.]\s*/i, '')
         .replace(/\[SESSION_COMPLETE\]/g, '')
+        .replace(/,\s*,/g, ',') // Remove double commas
+        .replace(/,\s*$/g, '')  // Remove trailing comma
+        .replace(/\s\s+/g, ' ') // Collapse extra spaces
         .trim();
 
       const isComplete = atcText.includes('[SESSION_COMPLETE]');
@@ -327,8 +330,11 @@ export default function TrainingSimulator() {
     setFallbackText('');
     setIsChainSession(chain);
 
+    // Load last known weakness from localStorage for RL selection
+    const lastWeakness = localStorage.getItem('skycoach_last_weakness') || 'None';
+    
     // Choose RL Scenario Type if doing a full chain
-    const chosenTraffic = chain ? selectRLScenario({ weakestCategory: 'None' }) : 'Normal Traffic';
+    const chosenTraffic = chain ? selectRLScenario({ weakestCategory: lastWeakness }) : 'Normal Traffic';
     setScenarioTraffic(chosenTraffic);
 
     const sysCtx = buildSessionContext(sit as any, cs, customTopic);
@@ -341,8 +347,9 @@ STRICT CONCISENESS & ICAO RULES:
 2. No unnecessary pleasantries. Jump immediately to the radio call.
 3. FORMAT: "[Instruction], [Callsign]" or "[Callsign], [Instruction]".
 4. If something is unavailable: "[Item] unavailable, [New Instruction], [Callsign]".
-5. ${!chain ? "STATIC DRILL: Once the pilot correctly reads back the instruction, acknowledge and append '[SESSION_COMPLETE]'." : ""}
-6. Include EXPECTED_READBACK: after your radio call.` 
+5. ALTITUDE RULE: Always use Flight Level format "FLXXX" for 10,000ft and above (e.g. "FL100", "FL180", "FL350"). Use feet only for altitudes strictly below 10,000 (e.g. "5,000").
+6. ${!chain ? "STATIC DRILL: If the pilot's readback is correct, provide a realistic aviation confirmation or next minor instruction (e.g. '[Callsign], roger, contact tower on 119.0' or '[Callsign], readback correct, report clear of the runway') and append '[SESSION_COMPLETE]'." : ""}
+7. Include EXPECTED_READBACK: after your radio call.` 
     };
     const history = [sysMsg];
     setSessionHistory(history);
@@ -506,7 +513,20 @@ STRICT CONCISENESS & ICAO RULES:
 
         // Let RL engine track progress
         if (validation) {
-          updateQValue({ weakestCategory: 'None' }, scenarioTraffic, validation.score / 100, { weakestCategory: 'None' });
+          const currentWeakness = validation.errors[0]?.category || 'None';
+          const lastWeakness = localStorage.getItem('skycoach_last_weakness') || 'None';
+          
+          updateQValue(
+            { weakestCategory: lastWeakness }, 
+            scenarioTraffic, 
+            validation.score / 100, 
+            { weakestCategory: currentWeakness }
+          );
+          
+          // Update global state tracking
+          if (currentWeakness && (currentWeakness as string) !== 'None') {
+            localStorage.setItem('skycoach_last_weakness', currentWeakness);
+          }
         }
 
         import('../services/simulatorEngine').then(async m => {
@@ -557,6 +577,12 @@ STRICT CONCISENESS & ICAO RULES:
     cancelTTS();
     const s = aggregateStats(finalMessages || messages);
     setStats(s);
+    
+    // Save final aggregate weakness for RL state initialization in next session
+    if (s.weakestCategory && s.weakestCategory !== 'None') {
+      localStorage.setItem('skycoach_last_weakness', s.weakestCategory);
+    }
+    
     setPhase('debrief');
   };
 

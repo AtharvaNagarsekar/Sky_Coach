@@ -73,6 +73,7 @@ const PHASE_RULES: Record<string, string> = {
 GROUND PHASE RULES (aircraft is parked at gate, engines off):
 - NEVER mention altitude — aircraft is on the ground.
 - ATC/Clearance delivery issues IFR clearance: route, squawk code, initial altitude, departure frequency.
+- ALTITUDE RULES: Use "FL100" for 10,000ft and above (e.g. "FL120", "FL180"). Use feet below 10,000 (e.g. "5,000").
 - Standard format: "[Callsign], cleared to [destination] via [SID/route], maintain [initial alt], expect [cruise alt] ten minutes after departure, departure frequency [freq], squawk [code]."
 - Pilot reads back: ALL items — destination, route, initial altitude, expect altitude, frequency, squawk, callsign.`,
 
@@ -101,6 +102,7 @@ GROUND PHASE RULES (taxiing to gate after landing):
 
   departure: `
 DEPARTURE PHASE RULES (takeoff and initial climb):
+- ALTITUDE RULES: Use "FL100" for 10,000ft and above. Use feet below 10,000.
 - Tower issues takeoff clearance with wind and any initial heading/SID.
 - Format: "[Callsign], wind [dir] at [kts], runway [XX], cleared for takeoff." or with heading: "fly runway heading."
 - After airborne, may instruct: "contact Departure on [freq]."
@@ -108,6 +110,7 @@ DEPARTURE PHASE RULES (takeoff and initial climb):
 
   climb: `
 CLIMB PHASE RULES (climbing out with Departure Control):
+- ALTITUDE RULES: ALWAYS use Flight Level format "FLXXX" for 10,000ft and above (e.g. "climb and maintain FL120").
 - Departure issues climb clearances, headings, and frequency changes.
 - Altitude format: "climb and maintain [altitude]" or "climb and maintain flight level [XXX]."
 - Heading format: "fly heading [XXX]" — always three digits.
@@ -116,13 +119,15 @@ CLIMB PHASE RULES (climbing out with Departure Control):
 
   cruise: `
 EN-ROUTE / CRUISE PHASE RULES:
+- ALTITUDE RULES: ALWAYS use Flight Level format "FLXXX" (e.g. "FL350").
 - Center issues altitude amendments, routing changes, frequency changes.
-- Use Flight Level format above FL180: "maintain flight level [XXX]."
-- Below FL180 use feet: "maintain [altitude]."
+- Use Flight Level format: "maintain flight level [XXX]."
+- Below 10,000ft use feet: "maintain [altitude]."
 - Pilot reads back: altitude or FL, new routing if given, callsign.`,
 
   descend: `
 DESCENT / APPROACH PHASE RULES:
+- ALTITUDE RULES: Use "FL100" and above for Flight Levels. Feet below 10,000.
 - Approach control issues descent clearance, speed control, vectors.
 - Format: "descend and maintain [altitude]", "reduce speed to [kts]", "fly heading [XXX], vectors ILS runway [XX]."
 - Altimeter setting must be given: "altimeter [QNH]."
@@ -130,9 +135,11 @@ DESCENT / APPROACH PHASE RULES:
 
   arrival: `
 ARRIVAL / ILS PHASE RULES:
+- ALTITUDE RULES: Feet for altitudes below 10,000. FL for 10,000+.
 - Approach issues ILS clearance with localiser intercept heading and cleared altitude.
 - Format: "[Callsign], turn [heading], maintain [altitude] until established, cleared ILS runway [XX] approach."
 - Pilot reads back: heading, altitude until established, "cleared ILS runway [XX]", callsign.`,
+
 
   hold: `
 HOLDING PATTERN RULES:
@@ -224,7 +231,8 @@ Nameplaces heard over radio are frequently corrupted. Accept ANY phonetically si
 General rule: if the spoken version sounds like the correct place name, accept it as correct.
 
 --- NUMBER / LEVEL FLEXIBILITY ---
-- "Flight Level 250" = "FL250" = "Two Five Zero" = "250" — all identical.
+- ALTITUDE RULE: Always use Flight Level format "FLXXX" for 10,000ft and above (e.g. "FL100", "FL180", "FL250"). Use feet only for altitudes strictly below 10,000 (e.g. "8,000").
+- "Flight Level 250" = "FL250" = "Two Five Zero" = "250" — all identical in the pilot's readback.
 - "Eight thousand" = "8,000 feet" = "8000".
 - Digits grouped differently are fine: "one two three" = "123".
 
@@ -291,7 +299,9 @@ STRICT CONCISENESS & ICAO RULES:
 - FORMAT: "[Instruction], [Callsign]" or "[Callsign], [Instruction]".
 - EXAMPLE: Instead of "Air India 171, descend and maintain...", say "AI171, descend and maintain FL250."
 - NEGATIONS: If something is unavailable, say "FL250 unavailable, maintain FL280, AI171."
-- SAFETY: Be calm and brief. Direct actions only.
+- ALTITUDE RULE: Always use Flight Level format "FLXXX" for 10,000ft and above (e.g., "FL100", "FL180", "FL350"). Use feet only for altitudes strictly below 10,000 (e.g., "5,000").
+- NO LAZY RESPONSES: If the pilot's readback is correct, do NOT just say "Roger" or "Acknowledge". Instead, PROGRESS the flight. Give them the next instruction (e.g. handoff to next frequency, next taxi waypoint, continue descent, etc.).
+- REALISM: Act like a professional controller. If they are landing, give them the runway exit or ground frequency. If they are climbing, give them the next altitude or a heading.
 
 Output ONLY valid JSON:
 {
