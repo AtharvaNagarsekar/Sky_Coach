@@ -2,7 +2,7 @@ import { useRef, useState, useEffect, useCallback } from 'react';
 import Header from '../components/Header';
 import { computeVoiceMetrics, computeOverallScores } from '../services/voiceAnalysis';
 import type { VoiceMetrics } from '../services/voiceAnalysis';
-import { preprocessAudio } from '../services/audioProcessor';
+import { preprocessAudio, computeRMS } from '../services/audioProcessor';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
   RadarChart, Radar, PolarGrid, PolarAngleAxis,
@@ -15,26 +15,40 @@ function CircularGauge({ value, max = 100, label, color, size = 110 }: {
   const r = (size / 2) - 12;
   const circ = 2 * Math.PI * r;
   const fill = circ * (1 - value / max);
-  const scoreColor = value > 70 ? color : value > 40 ? 'var(--yellow)' : 'var(--red)';
+  const scoreColor = value > 75 ? color : value > 40 ? 'var(--yellow)' : 'var(--red)';
 
   return (
-    <div className="gauge-wrap">
+    <div className="gauge-wrap" style={{ position: 'relative' }}>
       <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={10} />
+        <defs>
+          <filter id="glow">
+            <feGaussianBlur stdDeviation="2.5" result="coloredBlur"/>
+            <feMerge>
+              <feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/>
+            </feMerge>
+          </filter>
+        </defs>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth={12} />
         <circle
           cx={size / 2} cy={size / 2} r={r} fill="none"
-          stroke={scoreColor} strokeWidth={10}
+          stroke={scoreColor} strokeWidth={8}
           strokeDasharray={circ} strokeDashoffset={fill}
           strokeLinecap="round"
-          style={{ transition: 'stroke-dashoffset 0.4s ease, stroke 0.3s ease', filter: `drop-shadow(0 0 6px ${scoreColor})` }}
+          style={{ transition: 'stroke-dashoffset 0.6s cubic-bezier(0.4, 0, 0.2, 1)', filter: `drop-shadow(0 0 4px ${scoreColor}80)` }}
         />
         <text x={size / 2} y={size / 2 + 6} textAnchor="middle"
-          fill={scoreColor} fontSize={size < 100 ? 16 : 20} fontWeight={700}
+          fill={scoreColor} fontSize={size < 100 ? 16 : 22} fontWeight={800}
           fontFamily="Share Tech Mono" transform={`rotate(90, ${size / 2}, ${size / 2})`}>
           {value}
         </text>
       </svg>
-      <div className="gauge-label">{label}</div>
+      <div style={{ 
+        position: 'absolute', bottom: -8, left: '50%', transform: 'translateX(-50%)', 
+        fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.1em',
+        background: 'rgba(0,0,0,0.6)', padding: '2px 8px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.1)'
+      }}>
+        {label}
+      </div>
     </div>
   );
 }
@@ -72,9 +86,9 @@ export default function VoiceAnalyzer() {
   const [metrics, setMetrics] = useState<VoiceMetrics | null>(null);
   const [history, setHistory] = useState<VoiceMetrics[]>([]);
   const [alerts, setAlerts] = useState<string[]>([]);
-  const [fileName, setFileName] = useState<string | null>(null);
   const [isPlayingFile, setIsPlayingFile] = useState(false);
   const [analysisTime, setAnalysisTime] = useState(0);
+  const [logs, setLogs] = useState<{ id: number, msg: string, type: 'info' | 'warn' | 'crit' }[]>([]);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -85,6 +99,11 @@ export default function VoiceAnalyzer() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fftCanvasRef = useRef<HTMLCanvasElement>(null);
+  const syllablesRef = useRef<{ts: number}[]>([]); 
+  const [speechRate, setSpeechRate] = useState(0);
+  
+  const pauseTracker = useRef({ voice: 0, silence: 0, lastChange: Date.now() });
 
   const overall = computeOverallScores(history);
 
@@ -100,15 +119,12 @@ export default function VoiceAnalyzer() {
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = 'rgba(5,10,20,0)';
 
-    // Gradient line
     const grad = ctx.createLinearGradient(0, 0, W, 0);
     grad.addColorStop(0, '#00d4ff');
     grad.addColorStop(0.5, '#b983ff');
     grad.addColorStop(1, '#ffb347');
     ctx.strokeStyle = grad;
     ctx.lineWidth = 2;
-    ctx.shadowColor = '#00d4ff';
-    ctx.shadowBlur = 8;
 
     ctx.beginPath();
     const sliceW = W / buf.length;
@@ -120,34 +136,124 @@ export default function VoiceAnalyzer() {
     ctx.stroke();
   }, []);
 
+  // NEW: Frequency Spectrum Visualizer
+  const drawSpectrum = useCallback((analyser: AnalyserNode) => {
+    const canvas = fftCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d')!;
+    const freqData = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(freqData);
+
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    
+    const barWidth = (W / freqData.length) * 2.5;
+    let x = 0;
+    for (let i = 0; i < freqData.length; i++) {
+      const barH = (freqData[i] / 255) * H;
+      const hue = (i / freqData.length) * 360;
+      ctx.fillStyle = `hsla(${hue}, 70%, 50%, 0.8)`;
+      ctx.fillRect(x, H - barH, barWidth, barH);
+      x += barWidth + 1;
+    }
+  }, []);
+
   // RAF loop
   const rafLoop = useCallback(() => {
     if (!analyserRef.current) return;
+    const now = Date.now();
     const analyser = analyserRef.current;
     const buf = new Float32Array(analyser.fftSize);
     analyser.getFloatTimeDomainData(buf);
 
     const processed = preprocessAudio(buf);
-    const m = computeVoiceMetrics(processed, analyser.context.sampleRate, pitchHistory.current[pitchHistory.current.length - 1] || 0, pitchHistory.current, Date.now());
+    const rawRms = computeRMS(buf); 
+
+    // Standard high-fidelity Energy mapping (no auto-flattening)
+    const normalizedEnergy = Math.min(100, (rawRms / 0.1) * 100);
+
+    const m = computeVoiceMetrics(
+      processed, 
+      analyser.context.sampleRate, 
+      pitchHistory.current[pitchHistory.current.length - 1] || 0, 
+      pitchHistory.current, 
+      now,
+      rawRms
+    );
+    // Override with calibrated energy
+    m.energyLevel = Math.round(normalizedEnergy);
+
+    // Temporal Hesitation Logic
+    const dur = now - pauseTracker.current.lastChange;
+    pauseTracker.current.lastChange = now;
+    if (m.hasVoice) {
+      pauseTracker.current.voice = Math.min(2000, pauseTracker.current.voice + dur);
+      pauseTracker.current.silence = Math.max(0, pauseTracker.current.silence - dur/2);
+    } else {
+      pauseTracker.current.silence = Math.min(2000, pauseTracker.current.silence + dur);
+      pauseTracker.current.voice = Math.max(0, pauseTracker.current.voice - dur/4);
+    }
+    const hesitationRatio = (pauseTracker.current.silence / Math.max(1, pauseTracker.current.voice + pauseTracker.current.silence));
+    m.hesitation = Math.round(hesitationRatio * 100);
 
     if (m.pitchHz > 50 && m.pitchHz < 500) {
       pitchHistory.current = [...pitchHistory.current.slice(-50), m.pitchHz];
     }
 
-    setMetrics(m);
-    setHistory(prev => [...prev.slice(-300), m]);
+    // WPM Logic: High-speed Syllable Flux Detection
+    // Detect onset of speech energy (syllable boundary)
+    if (m.hasVoice && m.energyLevel > 15) {
+      const lastPeak = syllablesRef.current[syllablesRef.current.length - 1]?.ts || 0;
+      if (now - lastPeak > 100) { // Reduced from 150ms for aviation rapid-fire
+        syllablesRef.current.push({ ts: now });
+      }
+    }
+    syllablesRef.current = syllablesRef.current.filter(s => now - s.ts < 8000); // 8s window
+    const currentWpm = Math.round((syllablesRef.current.length / 8) * 60 / 1.3); // 1.3 syllables/word avg in tech English
+    setSpeechRate(prev => Math.round(prev * 0.8 + currentWpm * 0.2));
+    m.speechRate = currentWpm; // Use real-time value for metrics
 
-    // Alert logic
-    if (m.isHighStress) setAlerts(prev => prev.includes('HIGH STRESS DETECTED') ? prev : [...prev.slice(-2), 'HIGH STRESS DETECTED']);
-    if (m.isConfused) setAlerts(prev => prev.includes('CONFUSION INDICATORS DETECTED') ? prev : [...prev.slice(-2), 'CONFUSION INDICATORS DETECTED']);
+    // Dynamic logging for professional feel
+    if (m.hasVoice && Math.random() < 0.05) {
+      setLogs(prev => [{ id: Date.now(), msg: `SYNC: Vocal Activity Detected [${Math.round(m.pitchHz)}Hz]`, type: 'info' }, ...prev.slice(0, 15)]);
+    }
+    if (currentWpm > 180) {
+      setLogs(prev => [{ id: Date.now(), msg: `WARNING: High WPM Threshold Breach [${currentWpm}]`, type: 'warn' }, ...prev.slice(0, 15)]);
+    }
+
+    setMetrics(m);
+    setHistory(prev => [...prev.slice(-2000), m]);
+
+    // Radio-Aware Sustained Alert Logic (30s Rolling Average)
+    const voicedHistory = history.filter(h => h.hasVoice).slice(-600); 
+    if (voicedHistory.length > 100) { 
+      const avgStress = voicedHistory.reduce((s, h) => s + h.stressScore, 0) / voicedHistory.length;
+      const avgFatigue = voicedHistory.reduce((s, h) => s + h.fatigueScore, 0) / voicedHistory.length;
+      
+      if (avgStress > 75) {
+        setAlerts(prev => prev.includes('SUSTAINED STRESS (30S AVG)') ? prev : [...prev.slice(-2), 'SUSTAINED STRESS (30S AVG)']);
+      }
+      if (avgFatigue > 70) {
+        setAlerts(prev => prev.includes('SUSTAINED FATIGUE (30S AVG)') ? prev : [...prev.slice(-2), 'SUSTAINED FATIGUE (30S AVG)']);
+      }
+    }
 
     drawWaveform(analyser);
+    drawSpectrum(analyser);
     animFrameRef.current = requestAnimationFrame(rafLoop);
-  }, [drawWaveform]);
+  }, [drawWaveform, drawSpectrum, speechRate, history]);
 
   const startLive = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: false, sampleRate: 16000 }, video: false });
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: { 
+          echoCancellation: true, 
+          noiseSuppression: false, 
+          autoGainControl: false, // Prevents browser from flattening radio dynamics
+          sampleRate: 16000 
+        }, 
+        video: false 
+      });
       streamRef.current = stream;
       audioCtxRef.current = new AudioContext({ sampleRate: 16000 });
       const src = audioCtxRef.current.createMediaStreamSource(stream);
@@ -164,7 +270,7 @@ export default function VoiceAnalyzer() {
       timerRef.current = setInterval(() => setAnalysisTime(Math.floor((Date.now() - startTimeRef.current) / 1000)), 1000);
       rafLoop();
     } catch {
-      alert('Microphone access denied. Please allow microphone permissions.');
+      alert('Microphone access denied.');
     }
   };
 
@@ -179,7 +285,6 @@ export default function VoiceAnalyzer() {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setFileName(file.name);
     setHistory([]);
     setAlerts([]);
     pitchHistory.current = [];
@@ -222,13 +327,13 @@ export default function VoiceAnalyzer() {
     };
   }, []);
 
-  // Recharts data
   const chartData = history.filter((_, i) => i % 5 === 0).slice(-60).map((m, i) => ({
     t: i,
     stress: m.stressScore,
     conf: m.confidenceScore,
     clarity: m.clarityScore,
     energy: m.energyLevel,
+    fatigue: m.fatigueScore,
   }));
 
   const radarData = metrics ? [
@@ -236,7 +341,7 @@ export default function VoiceAnalyzer() {
     { subject: 'Clarity', A: metrics.clarityScore },
     { subject: 'Stability', A: metrics.pitchStability },
     { subject: 'Energy', A: metrics.energyLevel },
-    { subject: 'Calm', A: Math.max(0, 100 - metrics.stressScore) },
+    { subject: 'Fatigue', A: metrics.fatigueScore },
   ] : [];
 
   const isActive = isRecording || isPlayingFile;
@@ -258,7 +363,6 @@ export default function VoiceAnalyzer() {
       </Header>
 
       <div style={{ flex: 1, overflow: 'auto', padding: '20px 0 0', display: 'flex', flexDirection: 'column', gap: 20 }}>
-        {/* Alerts */}
         {alerts.map((a, i) => (
           <div key={i} className="alert-banner danger fade-in">
             <span style={{ fontSize: '1.1rem' }}>⚠️</span>
@@ -266,44 +370,38 @@ export default function VoiceAnalyzer() {
           </div>
         ))}
 
-        {/* Controls */}
         <div className="glass-panel" style={{ padding: '20px', flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
             <div className="tab-bar" style={{ minWidth: 260 }}>
               <button className={`tab-btn${mode === 'live' ? ' active' : ''}`} onClick={() => { if (!isActive) setMode('live'); }}>🎙 Live Mic</button>
               <button className={`tab-btn${mode === 'upload' ? ' active' : ''}`} onClick={() => { if (!isActive) setMode('upload'); }}>📁 Upload File</button>
             </div>
-
-            {mode === 'live' && (
-              isRecording
-                ? <button className="btn btn-danger" onClick={stopLive}>■ Stop Recording</button>
-                : <button className="btn btn-primary" onClick={startLive}>▶ Start Recording</button>
-            )}
-
+            {mode === 'live' && (isRecording ? <button className="btn btn-danger" onClick={stopLive}>■ Stop Recording</button> : <button className="btn btn-primary" onClick={startLive}>▶ Start Recording</button>)}
             {mode === 'upload' && !isPlayingFile && (
-              <label className="btn btn-amber" style={{ cursor: 'pointer' }}>
-                📁 Load Audio File
-                <input type="file" accept="audio/*" style={{ display: 'none' }} onChange={handleFileUpload} />
-              </label>
+              <label className="btn btn-amber" style={{ cursor: 'pointer' }}>📁 Load Audio File<input type="file" accept="audio/*" style={{ display: 'none' }} onChange={handleFileUpload} /></label>
             )}
-            {fileName && <span style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{fileName}</span>}
           </div>
         </div>
 
-        {/* Waveform */}
-        <div className="glass-panel" style={{ padding: '16px', flexShrink: 0 }}>
-          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>Waveform</div>
-          <canvas ref={canvasRef} width={1200} height={80} style={{ width: '100%', height: 80, borderRadius: 8, background: 'rgba(5,10,20,0.6)' }} />
+        <div className="grid-2" style={{ gap: 20 }}>
+          <div className="glass-panel" style={{ padding: '16px' }}>
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 10 }}>Temporal Waveform</div>
+            <canvas ref={canvasRef} width={600} height={80} style={{ width: '100%', height: 80, borderRadius: 8, background: 'rgba(5,10,20,0.4)' }} />
+          </div>
+          <div className="glass-panel" style={{ padding: '16px' }}>
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 10 }}>Frequency Spectrum (FFT)</div>
+            <canvas ref={fftCanvasRef} width={600} height={80} style={{ width: '100%', height: 80, borderRadius: 8, background: 'rgba(5,10,20,0.4)' }} />
+          </div>
         </div>
 
-        {/* Live Gauges */}
         {metrics && (
-          <div className="grid-4">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16 }}>
             {[
               { label: 'STRESS',     value: metrics.stressScore,     color: 'var(--red)' },
               { label: 'CONFIDENCE', value: metrics.confidenceScore,  color: 'var(--cyan-primary)' },
               { label: 'CLARITY',    value: metrics.clarityScore,     color: 'var(--green)' },
               { label: 'ENERGY',     value: metrics.energyLevel,      color: 'var(--amber)' },
+              { label: 'FATIGUE',    value: metrics.fatigueScore,     color: '#ff7e33' },
             ].map(g => (
               <div key={g.label} className="glass-card" style={{ display: 'flex', justifyContent: 'center', padding: '20px 12px' }}>
                 <CircularGauge value={g.value} label={g.label} color={g.color} />
@@ -313,9 +411,8 @@ export default function VoiceAnalyzer() {
         )}
 
         <div className="grid-2">
-          {/* Time-series chart */}
           <div className="glass-panel" style={{ padding: '16px' }}>
-            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 12 }}>Timeline — Stress / Confidence / Clarity</div>
+            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 12 }}>Timeline — Stress / Confidence / Clarity</div>
             {chartData.length > 1 ? (
               <ResponsiveContainer width="100%" height={180}>
                 <LineChart data={chartData}>
@@ -325,19 +422,15 @@ export default function VoiceAnalyzer() {
                   <Line type="monotone" dataKey="stress"  stroke="var(--red)"          strokeWidth={2} dot={false} name="Stress" />
                   <Line type="monotone" dataKey="conf"    stroke="var(--cyan-primary)" strokeWidth={2} dot={false} name="Confidence" />
                   <Line type="monotone" dataKey="clarity" stroke="var(--green)"        strokeWidth={2} dot={false} name="Clarity" />
+                  <Line type="monotone" dataKey="fatigue" stroke="#ff7e33"             strokeWidth={1} dot={false} name="Fatigue" />
                 </LineChart>
               </ResponsiveContainer>
-            ) : (
-              <div style={{ height: 180, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                {isActive ? 'Collecting data...' : 'Start analysis to see chart'}
-              </div>
-            )}
+            ) : <div style={{ height: 180, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>No Data</div>}
           </div>
 
-          {/* Radar */}
           <div className="glass-panel" style={{ padding: '16px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8, alignSelf: 'flex-start' }}>Voice Profile</div>
-            {radarData.length > 0 ? (
+            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 8, alignSelf: 'flex-start' }}>Voice Profile</div>
+            {radarData.length > 0 && (
               <ResponsiveContainer width="100%" height={200}>
                 <RadarChart data={radarData}>
                   <PolarGrid stroke="rgba(255,255,255,0.08)" />
@@ -345,62 +438,96 @@ export default function VoiceAnalyzer() {
                   <Radar name="Voice" dataKey="A" stroke="var(--cyan-primary)" fill="var(--cyan-primary)" fillOpacity={0.15} strokeWidth={2} />
                 </RadarChart>
               </ResponsiveContainer>
-            ) : (
-              <div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                Radar will appear during analysis
-              </div>
             )}
           </div>
         </div>
 
-        {/* Overall Report */}
-        {history.length > 20 && (
-          <div className="glass-panel" style={{ padding: '20px', flexShrink: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-              <h3 style={{ margin: 0 }}>Session Report</h3>
-              {!isActive && (
-                <span className="badge badge-green">Analysis Complete</span>
-              )}
+        {metrics && (
+          <div className="glass-panel" style={{ padding: '20px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20 }}>
+              <div style={{ width: 4, height: 16, background: 'var(--cyan-primary)', borderRadius: 2 }} />
+              <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)' }}>SUB-SCORE CONTRIBUTORS</div>
             </div>
-            <div className="grid-4" style={{ marginBottom: 16 }}>
-              <StatCard label="Avg Stress" value={overall.avgStress} unit="%" warn={70} />
-              <StatCard label="Avg Confidence" value={overall.avgConfidence} unit="%" good={60} />
-              <StatCard label="Avg Clarity" value={overall.avgClarity} unit="%" good={60} />
-              <StatCard label="Peak Stress" value={overall.peakStress} unit="%" warn={60} />
-            </div>
-            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-              {overall.avgStress > 70 && <Tip icon="⚠️" text="High average stress detected. Practice slow, deliberate read-backs." />}
-              {overall.avgConfidence < 50 && <Tip icon="📢" text="Low confidence indicators. Speak with authority and project your voice." />}
-              {overall.avgClarity < 50 && <Tip icon="🎙" text="Clarity needs improvement. Enunciate each number and callsign clearly." />}
-              {overall.avgStress < 40 && overall.avgConfidence > 60 && <Tip icon="✅" text="Excellent composure. Stress and confidence levels within optimal range." color="var(--green)" />}
+            <div className="grid-3" style={{ gap: 40 }}>
+              <div>
+                <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: 16, textTransform: 'uppercase' }}>Fatigue Contributors</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <SubBar label="Vocal Sag" value={Math.round((1 - metrics.spectralSlope/100) * 100)} color="#ff7e33" />
+                  <SubBar label="Energy Decay" value={Math.max(0, 50 - metrics.energyLevel)} color="#ff7e33" />
+                  <SubBar label="Speech Rate Lag" value={speechRate < 100 && metrics.hasVoice ? 60 : 0} color="#ff7e33" />
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: 16, textTransform: 'uppercase' }}>Stress Contributors</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <SubBar label="Micro-Jitter" value={metrics.jitter} color="var(--red)" />
+                  <SubBar label="Vocal Tension" value={Math.round(metrics.zcr * 200)} color="var(--red)" />
+                  <SubBar label="Rapid Speech" value={Math.min(100, Math.round(Math.max(0, (metrics.speechRate - 130) * 1.5)))} color="var(--red)" />
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: 16, textTransform: 'uppercase' }}>Cognitive State</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <SubBar label="Hesitation" value={metrics.hesitation} color="var(--cyan-primary)" />
+                  <SubBar label="Speech Rate (WPM)" value={Math.min(100, (speechRate / 200) * 100)} color="var(--cyan-primary)" />
+                  <SubBar label="Clarity Index" value={metrics.clarityScore} color="var(--cyan-primary)" />
+                </div>
+              </div>
             </div>
           </div>
         )}
 
-        {/* Pitch & Raw Data */}
+        {history.length > 20 && (
+          <div className="glass-panel" style={{ padding: '20px', flexShrink: 0 }}>
+            <h3 style={{ marginTop: 0 }}>Session Report</h3>
+            <div className="grid-5" style={{ marginBottom: 16 }}>
+              <StatCard label="Avg Stress" value={overall.avgStress} unit="%" warn={70} />
+              <StatCard label="Avg Confidence" value={overall.avgConfidence} unit="%" good={60} />
+              <StatCard label="Avg Clarity" value={overall.avgClarity} unit="%" good={60} />
+              <StatCard label="Avg Fatigue" value={overall.avgFatigue} unit="%" warn={60} />
+              <StatCard label="Avg Hesitation" value={overall.avgHesitation} unit="%" warn={50} />
+            </div>
+          </div>
+        )}
+
         {metrics && (
           <div className="grid-2">
             <div className="glass-panel" style={{ padding: '16px' }}>
-              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 14 }}>Raw Measurements</div>
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 14 }}>Technical Metrics</div>
               {[
                 { label: 'Fundamental Pitch', value: `${Math.round(metrics.pitchHz)} Hz`, color: 'var(--purple)' },
-                { label: 'Volume (dBFS)', value: `${Math.round(metrics.volumeDb)} dB`, color: 'var(--cyan-primary)' },
-                { label: 'Zero Crossing Rate', value: metrics.zcr.toFixed(4), color: 'var(--amber)' },
+                { label: 'Speech Rate (Est)', value: `${Math.round(speechRate)} WPM`, color: 'var(--yellow)' },
                 { label: 'Pitch Stability', value: `${metrics.pitchStability}%`, color: 'var(--green)' },
+                { label: 'HF Brilliance', value: `${metrics.spectralSlope}%`, color: 'var(--green)' },
                 { label: 'Voice Active', value: metrics.hasVoice ? 'YES' : 'NO', color: metrics.hasVoice ? 'var(--green)' : 'var(--text-muted)' },
               ].map(row => (
-                <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--border)' }}>
+                <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid var(--border)' }}>
                   <span style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{row.label}</span>
                   <span style={{ fontFamily: 'Share Tech Mono', fontSize: '0.82rem', color: row.color }}>{row.value}</span>
                 </div>
               ))}
             </div>
             <div className="glass-panel" style={{ padding: '16px' }}>
-              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 14 }}>VU Meters</div>
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 14 }}>Diagnostic Stream</div>
+              <div style={{ 
+                height: 140, overflow: 'hidden', padding: '10px', 
+                background: 'rgba(0,0,0,0.3)', borderRadius: 6, border: '1px solid rgba(255,255,255,0.05)',
+                display: 'flex', flexDirection: 'column', gap: 4, fontFamily: 'Share Tech Mono', fontSize: '0.7rem'
+              }}>
+                {logs.map(log => (
+                  <div key={log.id} style={{ color: log.type === 'warn' ? 'var(--amber)' : log.type === 'crit' ? 'var(--red)' : 'var(--cyan-primary)' }}>
+                    [{new Date(log.id).toLocaleTimeString([], { hour12: false })}] {log.msg}
+                  </div>
+                ))}
+                {logs.length === 0 && <div style={{ color: 'var(--text-muted)' }}>IDLE - NO TELEMETRY STREAM...</div>}
+              </div>
+            </div>
+            <div className="glass-panel" style={{ padding: '16px' }}>
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 14 }}>Vocal Power Projection</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                <VUMeter value={metrics.stressScore} label="Stress" />
-                <VUMeter value={metrics.confidenceScore} label="Confidence" />
-                <VUMeter value={metrics.energyLevel} label="Energy Level" />
+                <VUMeter value={metrics.stressScore} label="Pressure" />
+                <VUMeter value={metrics.confidenceScore} label="Firmness" />
+                <VUMeter value={metrics.energyLevel} label="Projection" />
               </div>
             </div>
           </div>
@@ -415,16 +542,21 @@ function StatCard({ label, value, unit = '', warn, good }: { label: string; valu
   return (
     <div className="glass-card" style={{ textAlign: 'center' }}>
       <div style={{ fontFamily: 'Share Tech Mono', fontSize: '1.5rem', fontWeight: 700, color }}>{value}{unit}</div>
-      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 4, textTransform: 'uppercase', letterSpacing: '0.07em' }}>{label}</div>
+      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 4, textTransform: 'uppercase' }}>{label}</div>
     </div>
   );
 }
 
-function Tip({ icon, text, color = 'var(--amber)' }: { icon: string; text: string; color?: string }) {
+function SubBar({ label, value, color }: { label: string; value: number; color: string }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '10px 14px', background: 'rgba(255,255,255,0.03)', border: `1px solid ${color}30`, borderRadius: 8, flex: 1, minWidth: 200 }}>
-      <span style={{ fontSize: '1rem', flexShrink: 0 }}>{icon}</span>
-      <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: 1.4 }}>{text}</span>
+    <div style={{ width: '100%' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+        <span style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>{label}</span>
+        <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontFamily: 'Share Tech Mono' }}>{value}%</span>
+      </div>
+      <div style={{ height: 4, background: 'rgba(255,255,255,0.05)', borderRadius: 2, overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: `${Math.min(100, value)}%`, background: color, transition: 'width 0.4s ease' }} />
+      </div>
     </div>
   );
 }

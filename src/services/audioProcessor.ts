@@ -120,7 +120,7 @@ export function float32ToWav(samples: Float32Array, sampleRate = 16000): Blob {
  */
 export function preprocessAudio(raw: Float32Array): Float32Array {
   const gated = noiseGate(raw);
-  const normed = normalizeBuffer(gated);
+  const normed = normalizeBuffer(gated, 0.1);
   return normed;
 }
 
