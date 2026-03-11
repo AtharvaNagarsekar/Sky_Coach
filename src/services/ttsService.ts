@@ -51,41 +51,121 @@ function numberToWords(n: number): string {
 }
 
 let selectedVoice: SpeechSynthesisVoice | null = null;
+let audioCtx: AudioContext | null = null;
+let staticNode: AudioBufferSourceNode | null = null;
+let gainNode: GainNode | null = null;
 
-function loadVoice() {
+export function getRandomVoice(): string {
+  if (typeof speechSynthesis === 'undefined') return '';
   const voices = speechSynthesis.getVoices();
-  // Prefer US English male voice for ATC feel
-  const preferred = voices.find(v => v.lang === 'en-US' && /male|guy|man|david|mark|james/i.test(v.name))
-    || voices.find(v => v.lang === 'en-US')
-    || voices.find(v => v.lang.startsWith('en'))
-    || voices[0];
-  selectedVoice = preferred || null;
+  const englishVoices = voices.filter(v => v.lang.startsWith('en'));
+  const random = englishVoices[Math.floor(Math.random() * englishVoices.length)];
+  return random?.name || '';
+}
+
+function loadVoice(voiceName?: string) {
+  const voices = speechSynthesis.getVoices();
+  if (voiceName) {
+    selectedVoice = voices.find(v => v.name === voiceName) || null;
+  }
+  
+  if (!selectedVoice) {
+    const englishVoices = voices.filter(v => v.lang.startsWith('en'));
+    const random = englishVoices[Math.floor(Math.random() * englishVoices.length)];
+    selectedVoice = random || voices[0] || null;
+  }
 }
 
 export function initTTS() {
   if (typeof speechSynthesis !== 'undefined') {
-    loadVoice();
-    speechSynthesis.onvoiceschanged = loadVoice;
+    speechSynthesis.onvoiceschanged = () => {
+      // Don't auto-reset if someone is talking
+    };
   }
 }
 
-export function speakATC(text: string, onEnd?: () => void): void {
+// Generates a "Radio Static" effect using White Noise + Bandpass Filter
+function startRadioStatic(intensity = 0.05) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+
+    // 1. Create White Noise
+    const bufferSize = audioCtx.sampleRate * 2;
+    const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    const output = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+        output[i] = Math.random() * 2 - 1;
+    }
+
+    staticNode = audioCtx.createBufferSource();
+    staticNode.buffer = buffer;
+    staticNode.loop = true;
+
+    // 2. Filter it to sound like a radio (narrow band)
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 1500;
+    filter.Q.value = 1.0;
+
+    gainNode = audioCtx.createGain();
+    gainNode.gain.value = intensity;
+
+    staticNode.connect(filter);
+    filter.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+
+    staticNode.start();
+  } catch (e) {
+    console.error("Audio FX error:", e);
+  }
+}
+
+function stopRadioStatic() {
+  if (staticNode) {
+    try {
+      staticNode.stop();
+      staticNode.disconnect();
+    } catch(e) {}
+    staticNode = null;
+  }
+}
+
+export function speakATC(text: string, onEnd?: () => void, difficulty: 'easy' | 'normal' | 'hard' = 'normal', voiceName?: string): void {
   if (typeof speechSynthesis === 'undefined') return;
   speechSynthesis.cancel();
+  stopRadioStatic();
+
+  // Use specific voice if provided, or pick one
+  loadVoice(voiceName);
 
   const expanded = expandAviationText(text);
   const utt = new SpeechSynthesisUtterance(expanded);
 
+  // Difficulty influences radio quality
+  const staticIntensity = difficulty === 'hard' ? 0.08 : difficulty === 'normal' ? 0.04 : 0.02;
+  const speechRate = difficulty === 'hard' ? 1.05 : 0.95;
+
   if (selectedVoice) utt.voice = selectedVoice;
-  utt.lang = 'en-US';
-  utt.rate = 0.92;   // Slightly slower for clarity
-  utt.pitch = 0.85;  // Slightly lower for authoritative ATC tone
+  utt.rate = speechRate;
+  utt.pitch = 0.9;
   utt.volume = 1.0;
 
-  if (onEnd) utt.onend = onEnd;
+  utt.onstart = () => startRadioStatic(staticIntensity);
+  
+  utt.onend = () => {
+    stopRadioStatic();
+    if (onEnd) onEnd();
+  };
+
+  utt.onerror = () => stopRadioStatic();
+
   speechSynthesis.speak(utt);
 }
 
 export function cancelTTS() {
-  if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel();
+  if (typeof speechSynthesis !== 'undefined') {
+    speechSynthesis.cancel();
+    stopRadioStatic();
+  }
 }

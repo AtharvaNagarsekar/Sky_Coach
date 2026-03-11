@@ -2,11 +2,11 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import Header from '../components/Header';
 import {
   SITUATIONS,
-  buildSessionContext, getATCResponse, validateReadback, aggregateStats,
+  getATCResponse, validateReadback, aggregateStats, getRandomAirport,
+  buildSessionContext, generateNextExchange
 } from '../services/simulatorEngine';
 import type { ConversationMessage, ReadbackValidation, SessionStats } from '../services/simulatorEngine';
-import { transcribeForSimulator } from '../services/transcriptionService';
-import { speakATC, cancelTTS, initTTS } from '../services/ttsService';
+import { speakATC, cancelTTS, initTTS, getRandomVoice } from '../services/ttsService';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { v4 as uuid } from 'uuid';
 import { updateQValue, selectRLScenario, getRLRecommendations } from '../services/rlEngine';
@@ -260,6 +260,8 @@ export default function TrainingSimulator() {
   const [rawTranscription, setRawTranscription] = useState('');
   const [processingStatus, setProcessingStatus] = useState<string>('');
   const [selectedMsgId, setSelectedMsgId] = useState<string | null>(null);
+  const [currentAirport, setCurrentAirport] = useState<any>(null);
+  const [atcVoiceName, setAtcVoiceName] = useState<string>('');
 
   const chatRef = useRef<HTMLDivElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -306,22 +308,36 @@ export default function TrainingSimulator() {
       appendMessage(msg);
       setSessionHistory(prev => [...prev, { role: 'assistant', content: cleanAtcText }]);
       
-      // TTS
+      // TTS with RL-based difficulty
+      const diffMap: Record<string, string> = { 'Normal Traffic': 'easy', 'Heavy Traffic': 'normal', 'Emergency': 'hard' };
+      const diff = (diffMap[scenarioTraffic] || 'normal') as any;
+
       speakATC(cleanAtcText, () => {
         setIsATCTalking(false);
-        if (isComplete) {
+        
+        // Auto-end session if ATC simply said "Roger" or "Readback correct"
+        const isRoger = /^(roger|readback correct|acknowledge|copy|cleared|fly|taxi|maintain|climb|descend|contact)/i.test(cleanAtcText) && 
+                       (cleanAtcText.toLowerCase().includes('roger') || cleanAtcText.toLowerCase().includes('readback correct')) &&
+                       cleanAtcText.split(' ').length < 15;
+        
+        if (isComplete || isRoger) {
           // Pass the latest messages to avoid stale closure
           setMessages(currentMsgs => {
             setTimeout(() => handleEndSession(currentMsgs), 1500);
             return currentMsgs;
           });
         }
-      });
+      }, diff, atcVoiceName);
+
+      // If frequency change instructed, switch voice for the NEXT person
+      if (/contact|frequency|switch to/i.test(cleanAtcText)) {
+        import('../services/ttsService').then(m => setAtcVoiceName(m.getRandomVoice()));
+      }
     } catch (e) {
       setError('Failed to get ATC response. Check your connection.');
       setIsATCTalking(false);
     }
-  }, [isChainSession, chainHistory, scenarioTraffic, callsign]);
+  }, [isChainSession, chainHistory, scenarioTraffic, callsign, atcVoiceName]);
 
   const handleStart = async (sit: string, cs: string, customTopic: string, chain: boolean) => {
     setSituation(sit);
@@ -330,14 +346,17 @@ export default function TrainingSimulator() {
     setFallbackText('');
     setIsChainSession(chain);
 
-    // Load last known weakness from localStorage for RL selection
+    const cfg = SITUATIONS[sit];
     const lastWeakness = localStorage.getItem('skycoach_last_weakness') || 'None';
-    
-    // Choose RL Scenario Type if doing a full chain
     const chosenTraffic = chain ? selectRLScenario({ weakestCategory: lastWeakness }) : 'Normal Traffic';
     setScenarioTraffic(chosenTraffic);
 
-    const sysCtx = buildSessionContext(sit as any, cs, customTopic);
+    const air = getRandomAirport();
+    setCurrentAirport(air);
+    
+    setAtcVoiceName(getRandomVoice());
+
+    const sysCtx = buildSessionContext(sit, cs, customTopic);
     const sysMsg = { 
       role: 'system' as const, 
       content: `${sysCtx}
@@ -348,50 +367,44 @@ STRICT CONCISENESS & ICAO RULES:
 3. FORMAT: "[Instruction], [Callsign]" or "[Callsign], [Instruction]".
 4. If something is unavailable: "[Item] unavailable, [New Instruction], [Callsign]".
 5. ALTITUDE RULE: Always use Flight Level format "FLXXX" for 10,000ft and above (e.g. "FL100", "FL180", "FL350"). Use feet only for altitudes strictly below 10,000 (e.g. "5,000").
-6. ${!chain ? "STATIC DRILL: If the pilot's readback is correct, provide a realistic aviation confirmation or next minor instruction (e.g. '[Callsign], roger, contact tower on 119.0' or '[Callsign], readback correct, report clear of the runway') and append '[SESSION_COMPLETE]'." : ""}
-7. Include EXPECTED_READBACK: after your radio call.` 
+6. ${!chain ? "STATIC DRILL: If the pilot's readback is correct, you MUST provide a VERY BRIEF confirmation (e.g. '[Callsign], roger' or '[Callsign], readback correct') and IMMEDIATELY append '[SESSION_COMPLETE]'. DO NOT repeat the instruction." : ""}
+7. RADIO INTERFERENCE: For high difficulty, occasionally simulate a realistic mid-sentence trailing off or cutoff using "..." at the very end of a call.
+8. Include EXPECTED_READBACK: after your radio call.` 
     };
+
     const history = [sysMsg];
     setSessionHistory(history);
     setPhase('session');
 
-    const cfg = SITUATIONS[sit];
-
     if (chain) {
-      const introMsg = `Initial Briefing: ${cfg ? cfg.context : customTopic}. Traffic density: ${chosenTraffic}.`;
+      const introMsg = `Initial Briefing: ${cfg ? cfg.context : customTopic} at ${air.name}. Traffic density: ${chosenTraffic}.`;
       setChainHistory([{ role: 'situation', text: introMsg }]);
-      const prompt: ConversationMessage = { id: uuid(), role: 'atc', text: `[Chain Session Started: ${chosenTraffic}. The flight is now active.]`, timestamp: new Date() };
+      const prompt: ConversationMessage = { id: uuid(), role: 'atc', text: `[Chain Session: ${air.icao} - ${chosenTraffic}. The flight is now active.]`, timestamp: new Date() };
       appendMessage(prompt);
 
-      // ATC generates first instruction in chain mode
       setIsATCTalking(true);
       setError(null);
-      import('../services/simulatorEngine').then(async m => {
-        try {
-          const resp = await m.generateNextExchange(
-            'Austin-Bergstrom International Airport (KAUS)', cs, 'Medium',
-            [{ role: 'situation', text: introMsg }], chosenTraffic
-          );
-          setCurrentExpected(resp.expected_readback);
-          const msg: ConversationMessage = { id: uuid(), role: 'atc', text: resp.atc_transmission, timestamp: new Date() };
-          appendMessage(msg);
-          setChainHistory(prev => [...prev, { role: 'atc', text: resp.atc_transmission }]);
-          speakATC(resp.atc_transmission, () => setIsATCTalking(false));
-        } catch (e) {
-          setError('Failed to generate chain instruction.');
-          setIsATCTalking(false);
-        }
-      });
+      try {
+        const resp = await generateNextExchange(air.name, cs, 'Medium', [{ role: 'situation', text: introMsg }], chosenTraffic);
+        setCurrentExpected(resp.expected_readback);
+        const msg: ConversationMessage = { id: uuid(), role: 'atc', text: resp.atc_transmission, timestamp: new Date() };
+        appendMessage(msg);
+        setChainHistory(prev => [...prev, { role: 'atc', text: resp.atc_transmission }]);
+        
+        const diffMap: Record<string, string> = { 'Normal Traffic': 'easy', 'Heavy Traffic': 'normal', 'Emergency': 'hard' };
+        speakATC(resp.atc_transmission, () => setIsATCTalking(false), (diffMap[chosenTraffic] || 'normal') as any, atcVoiceName);
+      } catch (e) {
+        setError('Failed to generate chain instruction.');
+        setIsATCTalking(false);
+      }
       return;
     }
 
     const atcFirst = cfg ? cfg.atcSpeaksFirst : false;
-
     if (atcFirst) {
       await addATCMessage(history);
     } else {
-      // Show prompt for pilot to speak first
-      const prompt: ConversationMessage = { id: uuid(), role: 'atc', text: `[Session started. You are ${cs}. Initiate contact with ATC for: ${cfg ? cfg.label : customTopic}]`, timestamp: new Date() };
+      const prompt: ConversationMessage = { id: uuid(), role: 'atc', text: `[Session started at ${air.icao}. You are ${cs}. Initiate contact with ATC for: ${cfg ? cfg.label : customTopic}]`, timestamp: new Date() };
       appendMessage(prompt);
     }
   };
@@ -404,21 +417,18 @@ STRICT CONCISENESS & ICAO RULES:
       streamRef.current = stream;
       chunksRef.current = [];
 
-      // Simplified High-Gain Pipeline (No aggressive filters)
       const ctx = new AudioContext({ sampleRate: 16000 });
       audioCtxRef.current = ctx;
       const source = ctx.createMediaStreamSource(stream);
 
       const gain = ctx.createGain();
-      gain.gain.value = 5.0; // High boost for clarity
+      gain.gain.value = 5.0;
       const dest = ctx.createMediaStreamDestination();
       
       source.connect(gain);
       gain.connect(dest);
 
-      const rec = new MediaRecorder(dest.stream, { 
-        mimeType: 'audio/webm' 
-      });
+      const rec = new MediaRecorder(dest.stream, { mimeType: 'audio/webm' });
       rec.ondataavailable = e => e.data.size > 0 && chunksRef.current.push(e.data);
       rec.start(); 
       recorderRef.current = rec;
@@ -449,26 +459,13 @@ STRICT CONCISENESS & ICAO RULES:
       }
     } catch (e) { }
 
-    // Wait for recorder to flush all chunks
     await new Promise(res => setTimeout(res, 600));
     const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-    console.log(`[Simulator] Audio Captured: ${Math.round(blob.size / 1024)} KB`);
-
-    if (blob.size < 500) {
-      setError(`Audio too quiet/short (${blob.size} bytes). Please speak louder and wait 1 sec before releasing.`);
-      setIsProcessing(false);
-      setProcessingStatus('');
-      return;
-    }
 
     try {
       setProcessingStatus('🎙️ Transcribing...');
       const { transcribeForSimulator } = await import('../services/transcriptionService');
-      const { correctedText, rawText } = await transcribeForSimulator(
-        blob,
-        currentExpected,
-        callsign
-      );
+      const { correctedText, rawText } = await transcribeForSimulator(blob, currentExpected, callsign);
 
       if (!rawText.trim()) {
         setError('No speech detected. Try speaking louder.');
@@ -487,7 +484,7 @@ STRICT CONCISENESS & ICAO RULES:
   };
 
   const submitFallbackText = async () => {
-    if (!fallbackText.trim()) return;
+    if (!fallbackText.trim() || isProcessing) return;
     setIsProcessing(true);
 
     const pilotText = fallbackText;
@@ -496,7 +493,6 @@ STRICT CONCISENESS & ICAO RULES:
     try {
       const pilotMsg: ConversationMessage = { id: uuid(), role: 'pilot', text: pilotText, timestamp: new Date() };
 
-      // Validate readback
       const lastATCMsg = [...messages].reverse().find(m => m.role === 'atc' && !m.text.startsWith('[Session'));
       let validation: ReadbackValidation | undefined;
       if (lastATCMsg && currentExpected) {
@@ -509,59 +505,40 @@ STRICT CONCISENESS & ICAO RULES:
       if (isChainSession) {
         const newHistory = [...chainHistory, { role: 'pilot' as const, text: pilotText }];
         setChainHistory(newHistory);
-        setIsProcessing(false);
 
-        // Let RL engine track progress
         if (validation) {
           const currentWeakness = validation.errors[0]?.category || 'None';
           const lastWeakness = localStorage.getItem('skycoach_last_weakness') || 'None';
-          
-          updateQValue(
-            { weakestCategory: lastWeakness }, 
-            scenarioTraffic, 
-            validation.score / 100, 
-            { weakestCategory: currentWeakness }
-          );
-          
-          // Update global state tracking
-          if (currentWeakness && (currentWeakness as string) !== 'None') {
+          updateQValue({ weakestCategory: lastWeakness }, scenarioTraffic, validation.score / 100, { weakestCategory: currentWeakness });
+          if (currentWeakness && currentWeakness !== 'None') {
             localStorage.setItem('skycoach_last_weakness', currentWeakness);
           }
         }
 
-        import('../services/simulatorEngine').then(async m => {
-          setIsATCTalking(true);
-          try {
-            const resp = await m.generateNextExchange(
-              'Austin-Bergstrom International Airport (KAUS)', callsign, 'Medium',
-              newHistory, scenarioTraffic
-            );
-            setCurrentExpected(resp.expected_readback);
+        const resp = await generateNextExchange(currentAirport?.name || 'KAUS', callsign, 'Medium', newHistory, scenarioTraffic);
+        setCurrentExpected(resp.expected_readback);
 
-            if (resp.session_complete) {
-              const msg: ConversationMessage = { id: uuid(), role: 'atc', text: '⛳ SESSION COMPLETE — Aircraft at gate. Well done!', timestamp: new Date() };
-              appendMessage(msg);
-              speakATC(msg.text, () => { 
-                setIsATCTalking(false); 
-                setMessages(currentMsgs => {
-                  setTimeout(() => handleEndSession(currentMsgs), 2000);
-                  return currentMsgs;
-                });
-              });
-            } else {
-              const msg: ConversationMessage = { id: uuid(), role: 'atc', text: resp.atc_transmission, timestamp: new Date() };
-              appendMessage(msg);
-              setChainHistory(prev => [...prev, { role: 'atc', text: resp.atc_transmission }]);
-              speakATC(resp.atc_transmission, () => setIsATCTalking(false));
-            }
-          } catch (e) {
-            setError('Failed to generate chain instruction.');
-            setIsATCTalking(false);
+        if (resp.session_complete) {
+          const msg: ConversationMessage = { id: uuid(), role: 'atc', text: '⛳ SESSION COMPLETE — Aircraft at gate. Well done!', timestamp: new Date() };
+          appendMessage(msg);
+          speakATC(msg.text, () => {
+             setMessages(currentMsgs => {
+              setTimeout(() => handleEndSession(currentMsgs), 2000);
+              return currentMsgs;
+            });
+          });
+        } else {
+          const msg: ConversationMessage = { id: uuid(), role: 'atc', text: resp.atc_transmission, timestamp: new Date() };
+          appendMessage(msg);
+          setChainHistory(prev => [...prev, { role: 'atc', text: resp.atc_transmission }]);
+          const diffMap: Record<string, string> = { 'Normal Traffic': 'easy', 'Heavy Traffic': 'normal', 'Emergency': 'hard' };
+          speakATC(resp.atc_transmission, () => {}, (diffMap[scenarioTraffic] || 'normal') as any, atcVoiceName);
+          if (/contact|frequency|switch to/i.test(resp.atc_transmission)) {
+            setAtcVoiceName(getRandomVoice());
           }
-        });
-
+        }
+        setIsProcessing(false);
       } else {
-        // Single session block
         const newHistory = [...sessionHistory, { role: 'user' as const, content: pilotText }];
         setSessionHistory(newHistory);
         setIsProcessing(false);
@@ -577,12 +554,9 @@ STRICT CONCISENESS & ICAO RULES:
     cancelTTS();
     const s = aggregateStats(finalMessages || messages);
     setStats(s);
-    
-    // Save final aggregate weakness for RL state initialization in next session
     if (s.weakestCategory && s.weakestCategory !== 'None') {
       localStorage.setItem('skycoach_last_weakness', s.weakestCategory);
     }
-    
     setPhase('debrief');
   };
 

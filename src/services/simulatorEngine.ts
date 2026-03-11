@@ -466,3 +466,21 @@ export function aggregateStats(messages: ConversationMessage[]): SessionStats {
     weakestCategory: weakest,
   };
 }
+
+// ─── Airport Variety ──────────────────────────────────────────────────────────
+
+export const AIRPORTS = [
+  { icao: 'KAUS', name: 'Austin–Bergstrom', location: 'Austin, TX', runways: '18L/36R, 18R/36L' },
+  { icao: 'WSSS', name: 'Singapore Changi', location: 'Singapore', runways: '02L/20R, 02C/20C, 02R/20L' },
+  { icao: 'EGLL', name: 'London Heathrow', location: 'London, UK', runways: '09L/27R, 09R/27L' },
+  { icao: 'KLAX', name: 'Los Angeles Intl', location: 'Los Angeles, CA', runways: '06L/24R, 06R/24L, 07L/25R, 07R/25L' },
+  { icao: 'OMDB', name: 'Dubai International', location: 'Dubai, UAE', runways: '12L/30R, 12R/30L' },
+  { icao: 'RJTT', name: 'Tokyo Haneda', location: 'Tokyo, Japan', runways: '16L/34R, 16R/34L, 04/22, 05/23' },
+  { icao: 'YSSY', name: 'Sydney Kingsford Smith', location: 'Sydney, Australia', runways: '16L/34R, 16R/34L, 07/25' },
+  { icao: 'EHAM', name: 'Amsterdam Schiphol', location: 'Amsterdam, Netherlands', runways: '06/24, 09/27, 18L/36R, 18C/36C, 18R/36L' }
+];
+
+export function getRandomAirport() {
+  const idx = Math.floor(Math.random() * AIRPORTS.length);
+  return AIRPORTS[idx];
+}
