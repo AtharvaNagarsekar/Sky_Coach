@@ -90,12 +90,15 @@ function startRadioStatic(intensity = 0.05) {
     if (!audioCtx) audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
 
-    // 1. Create White Noise
+    // 1. Create White Noise with a bit of "crackle" (random pulses)
     const bufferSize = audioCtx.sampleRate * 2;
     const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
     const output = buffer.getChannelData(0);
     for (let i = 0; i < bufferSize; i++) {
-        output[i] = Math.random() * 2 - 1;
+        const white = Math.random() * 2 - 1;
+        // Occasional extra "crackle" spike
+        const crackle = Math.random() > 0.999 ? (Math.random() * 4 - 2) : 0;
+        output[i] = white + crackle;
     }
 
     staticNode = audioCtx.createBufferSource();
@@ -142,13 +145,13 @@ export function speakATC(text: string, onEnd?: () => void, difficulty: 'easy' | 
   const expanded = expandAviationText(text);
   const utt = new SpeechSynthesisUtterance(expanded);
 
-  // Difficulty influences radio quality
-  const staticIntensity = difficulty === 'hard' ? 0.08 : difficulty === 'normal' ? 0.04 : 0.02;
-  const speechRate = difficulty === 'hard' ? 1.05 : 0.95;
+  // Difficulty influences radio quality (sharply increased for realism)
+  const staticIntensity = difficulty === 'hard' ? 0.18 : difficulty === 'normal' ? 0.08 : 0.04;
+  const speechRate = difficulty === 'hard' ? 1.30 : difficulty === 'normal' ? 1.10 : 0.95;
 
   if (selectedVoice) utt.voice = selectedVoice;
   utt.rate = speechRate;
-  utt.pitch = 0.9;
+  utt.pitch = 0.85; // Slightly lower pitch for more "radio" feel
   utt.volume = 1.0;
 
   utt.onstart = () => startRadioStatic(staticIntensity);
