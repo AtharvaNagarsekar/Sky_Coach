@@ -36,10 +36,12 @@ function stripAnalysis(text: string): string {
   // 1. Hard Cut: If we see these markers, everything after is AI meta-talk. Delete it.
   const cutPoints = [
     /###/g, 
-    /\*\*Validation:?\*\*/gi, /Validation:/gi,
-    /\*\*Notes?:?\*\*/gi, /Notes?:/gi,
-    /\*\*Analysis:?\*\*/gi, /Analysis:/gi,
-    /Processing Notes?:/gi,
+    /\s+-\s+(?:The|ATC|Readback|This|No)/gi, 
+    /\s\d\.\s/g, // Cut at numbered lists like " 1. Heading"
+    /No discrepancies detected/gi,
+    /The split follows/gi,
+    /matches the ATC instruction/gi,
+    /Validation:/gi, /Notes?:/gi, /Analysis:/gi,
     /Confidence:/gi
   ];
   
@@ -54,7 +56,7 @@ function stripAnalysis(text: string): string {
     .replace(/\s*\(ATC[^)]*\)/gi, '')
     .replace(/\s*\(PILOT[^)]*\)/gi, '')
     .replace(/thank you for watching|thanks for watching/gi, '')
-    .replace(/---|\*\*|\.\.\.|\*\*\*/g, '') // Remove clutter symbols
+    .replace(/---|[`*._]|\.\.\./g, '') // Remove backticks, stars, etc.
     .replace(/\[ATC\]|\[PILOT[^\]]*\]/gi, '') // Strip stray tags
     .replace(/\s{2,}/g, ' ')
     .trim();
@@ -163,10 +165,14 @@ function parsePlainTextOutput(text: string, rawInput: string, baseConfidence: nu
     if (pilotMatch) {
       flush();
       currentSpeaker = 'PILOT';
-      currentCallsign = pilotMatch[1]?.trim() || 'UNKNOWN';
+      let rawCall = pilotMatch[1]?.trim() || 'UNKNOWN';
+      // Strip parenthetical guesses like "(Callsign not explicitly stated...)"
+      currentCallsign = rawCall.split('(')[0].split(':').pop()?.trim() || 'UNKNOWN';
+      
       if (/^\d{3,5}$/.test(currentCallsign.replace(/\s/g, '')) ||
         currentCallsign.toLowerCase().includes('point') ||
-        currentCallsign.toLowerCase() === 'unknown') {
+        currentCallsign.toLowerCase() === 'unknown' ||
+        currentCallsign.length < 2) {
         currentCallsign = 'UNKNOWN';
       }
       const rest = line.replace(/^\[PILOT[\s–\-]+[^\]]*\]/i, '').replace(/^\[PILOT\]/i, '').trim();
@@ -228,38 +234,44 @@ TASKS:
    - If a callsign appears at the end of a message (e.g. "...Southwest 321"), the preceding sentence belongs to that Pilot.
    - Separate segments at speaker switches: acknowledgments ("Roger", "Wilco"), tone shifts (Instruction to Repetition), or when "Sir/Ma'am" is used.
 3. CLEAN TRANSCRIPT: Your [ATC] and [PILOT] output must contain ONLY the spoken words.
-   - ⚠ CRITICAL: Do NOT include notes, corrections, explanations, or meta-talk inside the [ATC] or [PILOT] blocks.
+   - ⚠ CRITICAL: Do NOT include ANY notes, numbered lists, corrections, or explanations.
+   - ⚠ SYSTEM FAILURE WARNING: If your output contains "1.", "2.", "matches", or "no discrepancies", you have FAILED.
 4. VALIDATE READBACK: Compare the pilot's readback in the "NEW RAW TRANSCRIPT" against the instructions in "PREVIOUS HISTORY".
    - ⚠ RELAXATION: If a pilot reads back a number (Altitude, Heading, Runway, QNH, Squawk) that ATC issued in the "PREVIOUS HISTORY", it is CORRECT. 
-   - NEVER flag it as "only referenced in history" — that is the primary point of a readback validation.
-5. FLAG DISCREPANCIES: ONLY if you find a genuine MISMATCH or CONTRADICTION between history and readback.
-   - ⚠ CRITICAL: If the readback matches the history, do NOT output a flag line.
+   - ⚠ PRECISION: Do NOT truncate digits. If history says "1045", it matches "1045".
+   - ⚠ SUFFIX MATCHING: If a pilot drops the leading 1 (e.g. says "045" for "1045"), this is logically correct. DO NOT flag it.
+   - NEVER flag a correct readback as "only referenced in history".
+5. FLAG DISCREPANCIES: ONLY if you find a genuine MISMATCH (e.g. ATC says Rwy 27, pilot says Rwy 28) or CONTRADICTION.
+   - ⚠ CRITICAL: If numbers match or are logically consistent, do NOT output a flag line.
    - ⚠ CRITICAL: Do NOT output "No discrepancies detected" or "Correct". 
- 
+
 STRICT DIARIZATION RULES:
 - Example: "Southwest 321 cleared for takeoff cleared for takeoff southwest 321" 
   SHOULD BE: 
   [ATC] Southwest 321 cleared for takeoff.
   [PILOT - Southwest 321] Cleared for takeoff, southwest 321.
 
-OUTPUT FORMAT:
+STRICT NUMERIC RULES:
+- If ATC says "1045" and Pilot says "1045", this is a PERFECT MATCH.
+- If ATC says "1045" and Pilot says "045", this is a VALID SUFFIX MATCH.
+
+PHRASEOLOGY & CALLSIGN RULES:
+- NATO Phonetics: Recognize Alpha, Bravo, Charlie, etc., as technical data.
+- Technical Numbers: Niner=9, Tree=3, Fife=5.
+- Airline Callsigns: Ground callsigns using history (e.g. "Velocity", "Qantas", "Jetstar").
+
+OUTPUT FORMAT (DO NOT INCLUDE ANYTHING ELSE):
 
 [ATC]
-The spoken words here.
+Spoken text
 
 [PILOT – Callsign]
-The spoken words here.
+Spoken text
 
-⚠ [TYPE] Detailed description of what was wrong. (ONLY OUTPUT THIS IF THERE IS AN ACTUAL ERROR).
-
-(Confidence: XX%)
-
-STRICT REPETITION RULES:
-1. ONLY process the transcript below.
-2. NEVER re-output lines from history.
+⚠ [TYPE] Description (ONLY if mismatch exists)
 
 NEW RAW TRANSCRIPT TO PROCESS:
-${rawText} (Analyze only this text, split ATC/Pilot if both are present)`;
+${rawText} (Analyze only this text, split ATC/Pilot if both present)`;
 
   try {
     const response = await fetch(MISTRAL_URL, {
