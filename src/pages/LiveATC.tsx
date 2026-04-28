@@ -158,6 +158,7 @@ export default function LiveATC() {
         }
       } catch (err) {
         console.error('Processing error:', err);
+        setError(`Transcription failed: ${err instanceof Error ? err.message : 'Unknown error'}. Please check your API keys.`);
       }
     }
 

@@ -269,7 +269,7 @@ export async function getATCResponse(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+      model: 'llama-3.3-70b-versatile',
       messages,
       temperature: 0.3,
       max_tokens: 400,
@@ -347,7 +347,7 @@ export async function generateNextExchange(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        model: 'llama-3.3-70b-versatile',
         messages,
         temperature: 0.4,
         response_format: { type: 'json_object' }
@@ -393,7 +393,7 @@ export async function validateReadback(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        model: 'llama-3.3-70b-versatile',
         messages: [
           { role: 'system', content: VALIDATION_SYSTEM_PROMPT },
           {
